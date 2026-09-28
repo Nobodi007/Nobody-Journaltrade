@@ -8,9 +8,7 @@ streamlit run app.py
 
 from __future__ import annotations
 
-import io
 import json
-from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import streamlit as st
@@ -250,7 +248,7 @@ def page_dashboard(df: pd.DataFrame, metrics: dict, info: dict) -> None:
     cur = info.get("currency", "")
 
     c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Balance", f"{s['balance']:,.2f}", cur or None)
+    c1.metric(f"Balance ({cur})" if cur else "Balance", f"{s['balance']:,.2f}")
     c2.metric("Equity", f"{s['equity']:,.2f}")
     c3.metric("กำไรสุทธิ", f"{s['net']:+,.2f}")
     c4.metric("Win Rate", f"{s['win_rate']:.1f}%", f"{int(s['wins'])}W / {int(s['losses'])}L")
@@ -327,14 +325,215 @@ def page_open(pos: pd.DataFrame) -> None:
     for _, r in pos.iterrows():
         tone = "nj-pos" if r["unrealized"] >= 0 else "nj-neg"
         st.markdown('<div class="nj-card nj-open">', unsafe_allow_html=True)
-        c1, c
+        c1, c2, c3, c4, c5 = st.columns([1.2, 1, 1, 1, 1.4])
+        c1.markdown(
+            f"**{r['symbol']}** &nbsp; <span class='nj-tag'>{r['direction']}</span>",
+            unsafe_allow_html=True,
+        )
+        c2.markdown(f"<span class='nj-muted'>Lots</span><br>{r['volume']:,.2f}", unsafe_allow_html=True)
+        c3.markdown(
+            f"<span class='nj-muted'>เข้า → ปัจจุบัน</span><br>"
+            f"{r['open_price']:,.5g} → {r['current_price']:,.5g}",
+            unsafe_allow_html=True,
+        )
+        sl = f"{r['stop_loss']:,.5g}" if r["stop_loss"] else "—"
+        tp = f"{r['take_profit']:,.5g}" if r["take_profit"] else "—"
+        c4.markdown(f"<span class='nj-muted'>SL / TP</span><br>{sl} / {tp}", unsafe_allow_html=True)
+        c5.markdown(
+            f"<span class='nj-muted'>กำไรลอยตัว</span><br>"
+            f"<span class='{tone}'>{r['unrealized']:+,.2f}</span>",
+            unsafe_allow_html=True,
+        )
+        if not r["stop_loss"]:
+            st.markdown(
+                "<span class='nj-tag'>⚠️ ไม่มี Stop Loss</span>", unsafe_allow_html=True
+            )
+        st.markdown("</div>", unsafe_allow_html=True)
 
-            st.info(
-        "แนะนำให้ใช้ Investor Password — เป็นรหัสสิทธิ์อ่านอย่างเดียว "
-        "ดูพอร์ตและประวัติได้ แต่ส่งคำสั่งเทรดไม่ได้ ปลอดภัยกว่ารหัสหลักมาก",
-        icon="🔒",
-    )
 
-    with st.form("add_account"):
+def _parse_mistakes(raw) -> list[str]:
+    if isinstance(raw, list):
+        return raw
+    try:
+        v = json.loads(raw or "[]")
+        return [m for m in v if m in MISTAKES] if isinstance(v, list) else []
+    except (TypeError, ValueError):
+        return []
 
-## โครงสร้างโปรเจกต์
+
+def _pick(options: list[str], value: str, blank: bool = True) -> int:
+    opts = ([""] if blank else []) + options
+    return opts.index(value) if value in opts else 0
+
+
+def page_journal(df: pd.DataFrame, store: NoteStore, aid: str) -> None:
+    st.subheader("Journal — บันทึกเหตุผลและบทเรียนรายไม้")
+    st.caption(f"ที่เก็บโน้ต: {store.backend}")
+    if store.remote is False:
+        st.warning(
+            "ตอนนี้ใช้ SQLite ชั่วคราว โน้ตจะหายเมื่อ Streamlit Cloud restart — "
+            "ตั้ง SUPABASE_URL / SUPABASE_KEY ใน secrets เพื่อเก็บถาวร"
+        )
+    if store.last_error:
+        st.error(store.last_error)
+
+    if df.empty:
+        st.info("ยังไม่มีไม้ที่ปิดในช่วงเวลาที่เลือก")
+        return
+
+    only_missing = st.checkbox("แสดงเฉพาะไม้ที่ยังไม่ได้บันทึก", value=False)
+    view = df[~df["has_note"]] if only_missing else df
+    if view.empty:
+        st.success("บันทึกครบทุกไม้แล้ว 🎉")
+        return
+
+    view = view.head(200)
+    labels = {
+        r["trade_id"]: (
+            f"{r['close_time']:%Y-%m-%d %H:%M} · {r['symbol']} {r['direction']} · "
+            f"{r['net']:+,.2f}{' · ✍️' if r['has_note'] else ''}"
+        )
+        for _, r in view.iterrows()
+    }
+    tid = st.selectbox("เลือกไม้", list(labels), format_func=labels.get)
+    row = df[df["trade_id"] == tid].iloc[0]
+
+    tone = "nj-win" if row["net"] > 0 else "nj-loss"
+    st.markdown(f'<div class="nj-card {tone}">', unsafe_allow_html=True)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Symbol", f"{row['symbol']} {row['direction']}")
+    c2.metric("Net", f"{row['net']:+,.2f}")
+    c3.metric("Lots", f"{row['volume']:,.2f}")
+    c4.metric("ถือนาน (นาที)", f"{row['duration_min']:,.0f}")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    note = store.get(tid, aid)
+
+    with st.form(f"note_{tid}"):
+        c1, c2, c3 = st.columns(3)
+        setup = c1.selectbox("Setup", [""] + SETUPS, index=_pick(SETUPS, note["setup"]))
+        tf = c2.selectbox("Timeframe", [""] + TIMEFRAMES, index=_pick(TIMEFRAMES, note["timeframe"]))
+        conf = c3.slider("ความมั่นใจ", 1, 5, int(note["confidence"] or 3))
+
+        c1, c2, c3 = st.columns(3)
+        emo_in = c1.selectbox("อารมณ์ตอนเข้า", [""] + EMOTIONS, index=_pick(EMOTIONS, note["emotion_in"]))
+        emo_out = c2.selectbox("อารมณ์ตอนออก", [""] + EMOTIONS, index=_pick(EMOTIONS, note["emotion_out"]))
+        followed = c3.checkbox("ทำตามแผน", value=bool(int(note["followed_plan"] or 0)))
+
+        mistakes = st.multiselect("ข้อผิดพลาด", MISTAKES, default=_parse_mistakes(note["mistakes"]))
+        thesis = st.text_area("เหตุผลที่เข้า (thesis)", value=str(note["thesis"] or ""), height=90)
+        lesson = st.text_area("บทเรียน", value=str(note["lesson"] or ""), height=90)
+        c1, c2 = st.columns(2)
+        tags = c1.text_input("Tags (คั่นด้วย ,)", value=str(note["tags"] or ""))
+        shot = c2.text_input("ลิงก์ภาพกราฟ", value=str(note["screenshot_url"] or ""))
+
+        if st.form_submit_button("บันทึก", type="primary", use_container_width=True):
+            ok = store.save(
+                tid, aid,
+                setup=setup, timeframe=tf, confidence=conf,
+                emotion_in=emo_in, emotion_out=emo_out, followed_plan=followed,
+                mistakes=mistakes, thesis=thesis, lesson=lesson,
+                tags=tags, screenshot_url=shot,
+            )
+            if ok:
+                st.success("บันทึกแล้ว")
+                st.rerun()
+            else:
+                st.error(store.last_error or "บันทึกไม่สำเร็จ")
+
+    if str(note["screenshot_url"]).startswith("http"):
+        st.image(note["screenshot_url"], use_container_width=True)
+
+
+# =========================================================
+# MAIN
+# =========================================================
+
+NAV = ["📊 Dashboard", "🟡 ไม้ที่เปิดอยู่", "📓 Journal", "🔌 เชื่อมต่อบัญชี"]
+
+
+def main() -> None:
+    if not gate():
+        st.stop()
+
+    with st.sidebar:
+        st.markdown(f"### 📓 {APP_NAME}")
+        st.caption(f"v{APP_VERSION}")
+
+        if not secret("METAAPI_TOKEN"):
+            st.text_input("MetaApi Token", type="password", key="mapi_token")
+
+        default_region = secret("METAAPI_REGION", "new-york")
+        st.selectbox(
+            "Region เริ่มต้น", REGIONS,
+            index=REGIONS.index(default_region) if default_region in REGIONS else 0,
+            key="mapi_region",
+        )
+        page = st.radio("เมนู", NAV, label_visibility="collapsed")
+
+    token, region = get_token(), get_region()
+    if not token:
+        st.info("ใส่ MetaApi Token ที่แถบด้านซ้าย (หรือตั้ง METAAPI_TOKEN ใน secrets)")
+        st.stop()
+
+    if page == NAV[3]:
+        page_connect(token, region)
+        return
+
+    try:
+        accs = fetch_accounts(token, region)
+    except MetaApiError as e:
+        st.error(f"ดึงรายการบัญชีไม่ได้: {e.message}")
+        st.stop()
+
+    if not accs:
+        st.info("ยังไม่มีบัญชี — ไปที่เมนู เชื่อมต่อบัญชี")
+        st.stop()
+
+    by_id = {(a.get("_id") or a.get("id")): a for a in accs}
+    with st.sidebar:
+        aid = st.selectbox(
+            "บัญชี", list(by_id),
+            format_func=lambda i: f"{by_id[i].get('name')} ({by_id[i].get('login')})",
+        )
+        days = st.select_slider("ช่วงข้อมูลย้อนหลัง (วัน)", [30, 90, 180, 365, 730], value=365)
+        if st.button("🔄 รีเฟรชข้อมูล", use_container_width=True):
+            clear_cache()
+            st.rerun()
+
+        acc = by_id[aid]
+        st.caption(f"{acc.get('state')} / {acc.get('connectionStatus')}")
+        if acc.get("state") != "DEPLOYED":
+            st.warning("บัญชีนี้ยังไม่ deploy — ไปที่เมนู เชื่อมต่อบัญชี")
+
+    # ใช้ region ของบัญชีนั้นจริง ไม่ใช่ค่าจาก sidebar
+    acc_region = acc.get("region") or region
+    store = get_store()
+
+    try:
+        if page == NAV[1]:
+            page_open(fetch_positions(token, acc_region, aid))
+            return
+
+        with st.spinner("กำลังดึงประวัติเทรด..."):
+            trades = fetch_history(token, acc_region, aid, days)
+        df = merge_notes(trades, store.load(aid))
+
+        if page == NAV[2]:
+            page_journal(df, store, aid)
+            return
+
+        try:
+            metrics = fetch_metrics(token, acc_region, aid)
+        except MetaApiError as e:
+            st.warning(f"ดึง metrics ไม่ได้ ({e.message}) — ใช้ค่าจากประวัติแทน")
+            metrics = {}
+        info = fetch_account_info(token, acc_region, aid)
+        merged = {**metrics, **{k: info[k] for k in ("balance", "equity") if k in info}}
+        page_dashboard(df, merged, info)
+
+    except MetaApiError as e:
+        st.error(f"เกิดข้อผิดพลาดจาก MetaApi: {e.message}")
+
+
+main()
