@@ -329,13 +329,12 @@ def page_open(pos: pd.DataFrame) -> None:
         st.markdown('<div class="nj-card nj-open">', unsafe_allow_html=True)
         c1, c
 
-        st.info(
-            "แนะนำให้ใช้ Investor Password — เป็นรหัสสิทธิ์อ่านอย่างเดียว "
-            "ดูพอร์ตและประวัติได้ แต่ส่งคำสั่งเทรดไม่ได้ ปลอดภัยกว่ารหัสหลักมาก",
-            icon="🔒",
-        )
-เยี่ยมครับ — REST version เหมาะกับ cloud ที่สุด เพราะ **ไม่ต้องใช้ asyncio** (SDK เป็น async ล้วน ซึ่งชนกับ Streamlit บ่อย) และไม่ต้องมี Windows VPS เลย
+            st.info(
+        "แนะนำให้ใช้ Investor Password — เป็นรหัสสิทธิ์อ่านอย่างเดียว "
+        "ดูพอร์ตและประวัติได้ แต่ส่งคำสั่งเทรดไม่ได้ ปลอดภัยกว่ารหัสหลักมาก",
+        icon="🔒",
+    )
 
-ผมยืนยัน endpoint จากเอกสารทางการแล้ว: MetaApi ใช้ header `auth-token` [metaapi](https://metaapi.cloud/docs/client/restApi/auth/) และ MetaStats มี endpoint `historical-trades/{start}/{end}` ที่ออกแบบมาเพื่อทำแอปแบบ Myfxbook โดยเฉพาะ [metaapi](https://metaapi.cloud/docs/metastats/restApi/api/getHistoricalTrades/)
+    with st.form("add_account"):
 
 ## โครงสร้างโปรเจกต์
