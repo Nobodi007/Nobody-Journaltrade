@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +56,7 @@ class NoteStore:
         self.url = secret("SUPABASE_URL").rstrip("/")
         self.key = secret("SUPABASE_KEY")
         self.remote = bool(self.url and self.key)
+        self.last_error = ""
 
         if self.remote:
             self.h = {
@@ -85,8 +86,10 @@ class NoteStore:
                     timeout=20,
                 )
                 r.raise_for_status()
+                self.last_error = ""
                 return pd.DataFrame(r.json())
-            except Exception:
+            except Exception as e:
+                self.last_error = f"โหลดโน้ตจาก Supabase ไม่ได้: {e}"
                 return pd.DataFrame()
 
         with closing(sqlite3.connect(DB_PATH)) as c:
@@ -111,7 +114,7 @@ class NoteStore:
             **fields,
             "trade_id": str(trade_id),
             "account_id": str(account_id),
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         if isinstance(payload.get("mistakes"), list):
             payload["mistakes"] = json.dumps(payload["mistakes"], ensure_ascii=False)
@@ -126,8 +129,11 @@ class NoteStore:
                     json=payload,
                     timeout=20,
                 )
+                if not r.ok:
+                    self.last_error = f"บันทึกไม่สำเร็จ [{r.status_code}] {r.text[:200]}"
                 return r.ok
-            except Exception:
+            except Exception as e:
+                self.last_error = f"บันทึกไม่สำเร็จ: {e}"
                 return False
 
         cols = ",".join(payload)
