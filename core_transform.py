@@ -7,19 +7,32 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+# เวลาที่ใช้แสดงผล (hour / weekday / date / month) — เปลี่ยนได้
+DISPLAY_TZ = "Asia/Bangkok"
+
+# ถ้า profit จาก MetaStats ยังไม่รวม commission/swap ให้ตั้งเป็น False
+# (เทียบไม้จริง 1-2 ไม้กับ MT5 เพื่อยืนยัน)
+METASTATS_PROFIT_INCLUDES_COSTS = True
+
 TRADE_COLS = [
     "trade_id", "symbol", "direction", "volume",
     "open_time", "close_time", "open_price", "close_price",
     "profit", "gain", "pips", "commission", "swap", "net",
     "duration_min", "success", "magic", "risk_pct", "type_raw",
 ]
+DERIVED_COLS = ["is_win", "is_loss", "costs", "date", "hour", "weekday", "month"]
+
+
+def _empty() -> pd.DataFrame:
+    return pd.DataFrame(columns=TRADE_COLS + DERIVED_COLS)
 
 
 def _num(v: Any, default: float = 0.0) -> float:
     try:
         if v is None:
             return default
-        return float(v)
+        f = float(v)
+        return default if np.isnan(f) else f
     except (TypeError, ValueError):
         return default
 
@@ -33,16 +46,42 @@ def _direction(t: str) -> str:
     return "—"
 
 
+def _col_sum(g: pd.DataFrame, col: str) -> float:
+    if col not in g.columns:
+        return 0.0
+    return float(pd.to_numeric(g[col], errors="coerce").fillna(0).sum())
+
+
+def _finish(df: pd.DataFrame) -> pd.DataFrame:
+    """เติมคอลัมน์อนุพันธ์ให้เหมือนกันทั้งสองเส้นทาง"""
+    df = df.dropna(subset=["close_time"]).copy()
+    if df.empty:
+        return _empty()
+
+    df["is_win"] = df["net"] > 0
+    df["is_loss"] = df["net"] < 0
+    df["costs"] = df["commission"].abs() + df["swap"].abs()
+
+    local = df["close_time"].dt.tz_convert(DISPLAY_TZ)
+    df["date"] = local.dt.date
+    df["hour"] = local.dt.hour
+    df["weekday"] = local.dt.day_name()
+    df["month"] = local.dt.strftime("%Y-%m")
+
+    return df.sort_values("close_time", ascending=False).reset_index(drop=True)
+
+
 def metastats_trades_to_df(trades: list[dict[str, Any]]) -> pd.DataFrame:
     """แปลงผลจาก MetaStats historical-trades"""
     if not trades:
-        return pd.DataFrame(columns=TRADE_COLS)
+        return _empty()
 
     rows = []
     for t in trades:
         profit = _num(t.get("profit"))
         comm = _num(t.get("commissions"))
         swap = _num(t.get("swap"))
+        net = profit if METASTATS_PROFIT_INCLUDES_COSTS else profit + comm + swap
 
         rows.append({
             "trade_id": str(t.get("_id") or t.get("id") or ""),
@@ -59,7 +98,7 @@ def metastats_trades_to_df(trades: list[dict[str, Any]]) -> pd.DataFrame:
             "pips": _num(t.get("pips")),
             "commission": comm,
             "swap": swap,
-            "net": profit,          # MetaStats profit รวมค่าธรรมเนียมแล้ว
+            "net": net,
             "duration_min": _num(t.get("durationInMinutes")),
             "success": (t.get("success") or "").lower(),
             "magic": int(_num(t.get("magic"))),
@@ -69,16 +108,7 @@ def metastats_trades_to_df(trades: list[dict[str, Any]]) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     for c in ("open_time", "close_time"):
         df[c] = pd.to_datetime(df[c], errors="coerce", utc=True)
-
-    df["is_win"] = df["net"] > 0
-    df["is_loss"] = df["net"] < 0
-    df["costs"] = df["commission"].abs() + df["swap"].abs()
-    df["date"] = df["close_time"].dt.date
-    df["hour"] = df["close_time"].dt.hour
-    df["weekday"] = df["close_time"].dt.day_name()
-    df["month"] = df["close_time"].dt.to_period("M").astype(str)
-
-    return df.sort_values("close_time", ascending=False).reset_index(drop=True)
+    return _finish(df)
 
 
 def positions_to_df(positions: list[dict[str, Any]]) -> pd.DataFrame:
@@ -117,14 +147,16 @@ def deals_to_trades(deals: list[dict[str, Any]]) -> pd.DataFrame:
     MT5 เก็บเป็น deal แยกเข้า/ออก ต้องจับกลุ่มด้วย positionId
     """
     if not deals:
-        return pd.DataFrame(columns=TRADE_COLS)
+        return _empty()
 
     df = pd.DataFrame(deals)
-    if "positionId" not in df.columns:
-        return pd.DataFrame(columns=TRADE_COLS)
+    if "positionId" not in df.columns or "entryType" not in df.columns:
+        return _empty()
 
     df["time"] = pd.to_datetime(df.get("time"), errors="coerce", utc=True)
-    df = df[df["positionId"].notna()]
+    for c in ("price", "volume"):
+        df[c] = pd.to_numeric(df.get(c), errors="coerce").fillna(0.0)
+    df = df[df["positionId"].notna() & (df["positionId"].astype(str) != "")]
 
     rows = []
     for pid, g in df.groupby("positionId"):
@@ -133,25 +165,23 @@ def deals_to_trades(deals: list[dict[str, Any]]) -> pd.DataFrame:
         outs = g[g["entryType"].isin(
             ["DEAL_ENTRY_OUT", "DEAL_ENTRY_OUT_BY", "DEAL_ENTRY_INOUT"]
         )]
-        if ins.empty:
+        # ข้ามไม้ที่ยังไม่ปิด
+        if ins.empty or outs.empty:
             continue
 
         first = ins.iloc[0]
-        vin = _num(ins["volume"].sum())
+        vin = float(ins["volume"].sum())
         open_px = (
             float((ins["price"] * ins["volume"]).sum() / vin) if vin else _num(first["price"])
         )
 
-        close_px, close_t = np.nan, pd.NaT
-        if not outs.empty:
-            vout = _num(outs["volume"].sum())
-            if vout:
-                close_px = float((outs["price"] * outs["volume"]).sum() / vout)
-            close_t = outs.iloc[-1]["time"]
+        vout = float(outs["volume"].sum())
+        close_px = float((outs["price"] * outs["volume"]).sum() / vout) if vout else np.nan
+        close_t = outs.iloc[-1]["time"]
 
-        profit = _num(g.get("profit", pd.Series([0])).sum())
-        comm = _num(g.get("commission", pd.Series([0])).sum())
-        swap = _num(g.get("swap", pd.Series([0])).sum())
+        profit = _col_sum(g, "profit")
+        comm = _col_sum(g, "commission")
+        swap = _col_sum(g, "swap")
         net = profit + comm + swap
 
         dur = np.nan
@@ -180,15 +210,6 @@ def deals_to_trades(deals: list[dict[str, Any]]) -> pd.DataFrame:
             "risk_pct": 0.0,
         })
 
-    out = pd.DataFrame(rows)
-    if out.empty:
-        return out
-
-    out["is_win"] = out["net"] > 0
-    out["is_loss"] = out["net"] < 0
-    out["costs"] = out["commission"].abs() + out["swap"].abs()
-    out["date"] = out["close_time"].dt.date
-    out["hour"] = out["close_time"].dt.hour
-    out["weekday"] = out["close_time"].dt.day_name()
-    out["month"] = out["close_time"].dt.to_period("M").astype(str)
-    return out.sort_values("close_time", ascending=False).reset_index(drop=True)
+    if not rows:
+        return _empty()
+    return _finish(pd.DataFrame(rows))
