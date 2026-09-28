@@ -6,6 +6,7 @@ MetaApi + MetaStats REST client
 from __future__ import annotations
 
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -56,6 +57,7 @@ class MetaApiClient:
         params: dict | None = None,
         json_body: dict | None = None,
         retry_202: bool = False,
+        headers: dict | None = None,
     ) -> Any:
         """ยิง request พร้อมจัดการ 202 (กำลังคำนวณ) และ 429 (rate limit)"""
         attempt = 0
@@ -63,7 +65,8 @@ class MetaApiClient:
             attempt += 1
             try:
                 r = self.s.request(
-                    method, url, params=params, json=json_body, timeout=HTTP_TIMEOUT
+                    method, url, params=params, json=json_body,
+                    headers=headers, timeout=HTTP_TIMEOUT,
                 )
             except requests.Timeout:
                 if attempt >= 3:
@@ -73,11 +76,16 @@ class MetaApiClient:
             except requests.RequestException as e:
                 raise MetaApiError(0, f"เชื่อมต่อไม่สำเร็จ: {e}")
 
-            # MetaStats ยังคำนวณไม่เสร็จ
-            if r.status_code == 202 and retry_202 and attempt <= MAX_RETRY:
-                wait = int(r.headers.get("retry-after", 5) or 5)
-                time.sleep(min(wait, 20))
-                continue
+            # MetaStats ยังคำนวณไม่เสร็จ (หรือ provisioning ขอให้เรียกซ้ำ)
+            if r.status_code == 202 and retry_202:
+                if attempt <= MAX_RETRY:
+                    try:
+                        wait = int(r.headers.get("retry-after", 5))
+                    except (TypeError, ValueError):
+                        wait = 5
+                    time.sleep(min(max(wait, 1), 20))
+                    continue
+                raise MetaApiError(202, "MetaApi ยังประมวลผลไม่เสร็จ ลองใหม่อีกครั้งในอีกสักครู่")
 
             if r.status_code == 429 and attempt <= MAX_RETRY:
                 time.sleep(min(2 ** attempt, 30))
@@ -146,7 +154,11 @@ class MetaApiClient:
             "metastatsApiEnabled": True,
         }
         return self._req(
-            "POST", f"{PROVISIONING_HOST}/users/current/accounts", json_body=body
+            "POST",
+            f"{PROVISIONING_HOST}/users/current/accounts",
+            json_body=body,
+            retry_202=True,
+            headers={"transaction-id": uuid.uuid4().hex},
         )
 
     def deploy(self, account_id: str) -> None:
