@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 
+import requests
 import pandas as pd
 import streamlit as st
 
@@ -102,6 +103,66 @@ def get_client(token: str, region: str) -> MetaApiClient:
 @st.cache_resource(show_spinner=False)
 def get_store() -> NoteStore:
     return NoteStore()
+
+
+def get_supabase_config() -> tuple[str, str]:
+    """อ่าน Supabase URL + publishable/anon key จาก Streamlit Secrets/env."""
+    return (
+        secret("SUPABASE_URL", "").strip().rstrip("/"),
+        secret("SUPABASE_KEY", "").strip(),
+    )
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def fetch_latest_mt5_snapshot() -> dict:
+    """อ่าน snapshot ล่าสุดจาก NobodyCollector -> Supabase."""
+    base_url, api_key = get_supabase_config()
+    if not base_url or not api_key:
+        return {}
+
+    url = (
+        f"{base_url}/rest/v1/mt5_account_snapshots"
+        "?select=*&order=collected_at.desc&limit=1"
+    )
+    headers = {
+        "apikey": api_key,
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+    }
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        rows = r.json()
+        return rows[0] if isinstance(rows, list) and rows else {}
+    except Exception as exc:
+        return {"_error": str(exc)}
+
+
+def render_mt5_snapshot(snapshot: dict) -> None:
+    """แสดงสถานะ MT5 จาก snapshot โดยไม่แตะ MetaApi."""
+    if not snapshot:
+        st.info("ยังไม่พบข้อมูล MT5 จาก Supabase")
+        return
+    if snapshot.get("_error"):
+        st.error(f"อ่าน MT5 จาก Supabase ไม่สำเร็จ: {snapshot['_error']}")
+        return
+
+    cur = str(snapshot.get("currency") or "")
+    collected = str(snapshot.get("collected_at") or "")
+    login = str(snapshot.get("login") or "-")
+    server = str(snapshot.get("server") or "-")
+    balance = float(snapshot.get("balance") or 0)
+    equity = float(snapshot.get("equity") or 0)
+    margin = float(snapshot.get("margin") or 0)
+    free_margin = float(snapshot.get("free_margin") or 0)
+
+    st.markdown("### 🟢 MT5 Live — Supabase")
+    st.caption(f"Login {login} · {server} · อัปเดตล่าสุด {collected}")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(f"Balance ({cur})" if cur else "Balance", f"{balance:,.2f}")
+    c2.metric(f"Equity ({cur})" if cur else "Equity", f"{equity:,.2f}")
+    c3.metric(f"Margin ({cur})" if cur else "Margin", f"{margin:,.2f}")
+    c4.metric(f"Free Margin ({cur})" if cur else "Free Margin", f"{free_margin:,.2f}")
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -273,6 +334,26 @@ def page_connect(token: str, region: str) -> None:
             st.success("undeploy แล้ว")
         except MetaApiError as e:
             st.error(e.message)
+
+
+def page_supabase_dashboard(snapshot: dict) -> None:
+    """Dashboard ขั้นแรกของ free MT5 pipeline: MT5 -> EA -> Supabase."""
+    st.markdown('<div class="nj-section-title">Portfolio Overview</div>', unsafe_allow_html=True)
+    st.caption("ข้อมูลบัญชี MT5 จาก NobodyCollector → Supabase")
+    render_mt5_snapshot(snapshot)
+
+    st.divider()
+    st.markdown("### 🔄 Data Pipeline")
+    st.success(
+        "MT5 → NobodyCollector → Supabase → Nobody Trade Journal ทำงานแล้ว "
+        "ข้อมูลบัญชีจะอัปเดตตามรอบ Collector",
+        icon="✅",
+    )
+    st.info(
+        "ขั้นนี้แสดง Account Snapshot ก่อน ส่วน Open Positions และ Trade History "
+        "จะต่อจาก Collector ในขั้นถัดไป โดยไม่พึ่ง MetaApi",
+        icon="ℹ️",
+    )
 
 
 def page_dashboard(df: pd.DataFrame, metrics: dict, info: dict) -> None:
@@ -503,8 +584,13 @@ def main() -> None:
 
         default_region = secret("METAAPI_REGION", "new-york")
         if not secret("METAAPI_TOKEN"):
-            st.markdown('<div class="nj-nav-label">MetaApi</div>', unsafe_allow_html=True)
-            st.text_input("MetaApi Token", type="password", key="mapi_token")
+            sb_url, sb_key = get_supabase_config()
+            if sb_url and sb_key:
+                st.markdown('<div class="nj-nav-label">MT5 Data</div>', unsafe_allow_html=True)
+                st.markdown('<div class="nj-side-card"><div class="nj-side-muted">SOURCE</div><div class="nj-side-value">🟢 Supabase / NobodyCollector</div></div>', unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="nj-nav-label">MetaApi</div>', unsafe_allow_html=True)
+                st.text_input("MetaApi Token", type="password", key="mapi_token")
         st.selectbox(
             "Region เริ่มต้น", REGIONS,
             index=REGIONS.index(default_region) if default_region in REGIONS else 0,
@@ -512,11 +598,31 @@ def main() -> None:
         )
 
     token, region = get_token(), get_region()
+    supabase_url, supabase_key = get_supabase_config()
+
+    # Free architecture: ถ้าไม่มี MetaApi ให้ใช้ MT5 -> Supabase เป็นแหล่งข้อมูลหลัก
+    if not token and supabase_url and supabase_key:
+        if page == NAV[0]:
+            page_supabase_dashboard(fetch_latest_mt5_snapshot())
+            return
+        if page == NAV[3]:
+            st.subheader("🔌 MT5 Collector")
+            st.success("Supabase เชื่อมต่อแล้ว — NobodyCollector กำลังส่งข้อมูลจาก MT5", icon="✅")
+            st.code("MT5 → NobodyCollector → Supabase → Nobody Trade Journal", language="text")
+            st.caption("ยังไม่ต้องใช้ MetaApi สำหรับ Account Snapshot")
+            return
+        st.info(
+            "หน้านี้ต้องรอ Collector เก็บ Positions / Trade History เพิ่มก่อน "
+            "ตอนนี้ Account Snapshot พร้อมใช้งานแล้ว",
+            icon="ℹ️",
+        )
+        return
+
     if not token:
         st.markdown(
             '<div class="nj-hero"><div class="nj-empty-icon">🔐</div>'
-            '<h2>ยังไม่ได้ตั้งค่า MetaApi</h2>'
-            '<p>ใส่ MetaApi Token ที่แถบด้านซ้าย หรือเพิ่ม <b>METAAPI_TOKEN</b> ใน Streamlit Secrets เพื่อเริ่มใช้งาน</p></div>',
+            '<h2>ยังไม่ได้ตั้งค่าแหล่งข้อมูล</h2>'
+            '<p>ตั้งค่า SUPABASE_URL + SUPABASE_KEY สำหรับ MT5 Collector หรือ METAAPI_TOKEN สำหรับโหมดเดิม</p></div>',
             unsafe_allow_html=True,
         )
         st.stop()
