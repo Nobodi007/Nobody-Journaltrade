@@ -849,11 +849,9 @@ def page_live_monitor(snapshot: dict) -> None:
     c3.metric("SELL Lots", f"{sell_lots:,.2f}")
     c4.metric("Position P&L", f"{floating_pos:+,.2f}")
 
-    st.markdown("### 🟢 Open Positions")
     render_supabase_positions(pos)
 
     st.divider()
-    st.markdown("### 🟡 Pending Orders")
     render_supabase_pending(pending)
 
     st.divider()
@@ -870,6 +868,103 @@ def page_live_monitor(snapshot: dict) -> None:
             "commission":"Commission", "swap":"Swap", "comment":"Comment",
         }
         st.dataframe(view.rename(columns=rename), use_container_width=True, hide_index=True)
+
+
+def page_exposure(snapshot: dict) -> None:
+    """Portfolio exposure view from the existing MT5 -> Supabase position feed.
+    Uses lots as the common exposure unit; no broker contract-size assumptions.
+    """
+    st.markdown('<div class="nj-section-title">Portfolio Exposure</div>', unsafe_allow_html=True)
+    st.caption("Exposure จาก Position ที่เปิดอยู่ · หน่วยหลักเป็น Lots · ไม่แตะ MT5 / Supabase schema")
+
+    if not snapshot:
+        st.warning("ยังไม่พบ Account Snapshot จาก Supabase")
+        return
+    if snapshot.get("_error"):
+        st.error(f"อ่าน MT5 จาก Supabase ไม่สำเร็จ: {snapshot['_error']}")
+        return
+
+    pos = fetch_mt5_positions_supabase(snapshot)
+    if pos.empty:
+        st.markdown(
+            '<div class="nj-hero"><div class="nj-empty-icon">📐</div>'
+            '<h2>ยังไม่มี Exposure จาก Position ที่เปิดอยู่</h2>'
+            '<p>เมื่อมี Position ใน MT5 ระบบจะคำนวณ Gross / Net Exposure แยกตาม Symbol ให้อัตโนมัติ</p></div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    work = pos.copy()
+    work["volume"] = pd.to_numeric(work.get("volume"), errors="coerce").fillna(0.0)
+    work["profit"] = pd.to_numeric(work.get("profit"), errors="coerce").fillna(0.0)
+    work["swap"] = pd.to_numeric(work.get("swap"), errors="coerce").fillna(0.0)
+    work["commission"] = pd.to_numeric(work.get("commission"), errors="coerce").fillna(0.0)
+    work["side_norm"] = work.get("side", "").astype(str).str.upper()
+    work["buy_lots"] = work["volume"].where(work["side_norm"].str.contains("BUY", na=False), 0.0)
+    work["sell_lots"] = work["volume"].where(work["side_norm"].str.contains("SELL", na=False), 0.0)
+
+    gross = float(work["volume"].sum())
+    buy = float(work["buy_lots"].sum())
+    sell = float(work["sell_lots"].sum())
+    net = buy - sell
+    pnl = float(work["profit"].sum())
+    net_pnl = pnl + float(work["swap"].sum()) + float(work["commission"].sum())
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Gross Exposure", f"{gross:,.2f} lots")
+    c2.metric("BUY Exposure", f"{buy:,.2f} lots")
+    c3.metric("SELL Exposure", f"{sell:,.2f} lots")
+    c4.metric("Net Exposure", f"{net:+,.2f} lots")
+    c5.metric("Net Floating P&L", f"{net_pnl:+,.2f}")
+
+    st.divider()
+    st.markdown("### Exposure by Symbol")
+    grouped = work.groupby("symbol", dropna=False).agg(
+        Positions=("volume", "size"),
+        Gross_Lots=("volume", "sum"),
+        Buy_Lots=("buy_lots", "sum"),
+        Sell_Lots=("sell_lots", "sum"),
+        Floating_PnL=("profit", "sum"),
+        Swap=("swap", "sum"),
+        Commission=("commission", "sum"),
+    ).reset_index()
+    grouped["Net_Lots"] = grouped["Buy_Lots"] - grouped["Sell_Lots"]
+    grouped["Net_PnL"] = grouped["Floating_PnL"] + grouped["Swap"] + grouped["Commission"]
+    grouped["Gross_Share"] = (grouped["Gross_Lots"] / gross * 100.0) if gross else 0.0
+    grouped = grouped.sort_values(["Gross_Lots", "symbol"], ascending=[False, True])
+
+    view = grouped.rename(columns={
+        "symbol":"Symbol", "Positions":"Positions", "Gross_Lots":"Gross Lots",
+        "Buy_Lots":"BUY Lots", "Sell_Lots":"SELL Lots", "Net_Lots":"Net Lots",
+        "Gross_Share":"Gross Share %", "Floating_PnL":"Floating P&L",
+        "Swap":"Swap", "Commission":"Commission", "Net_PnL":"Net P&L",
+    }).copy()
+    for col in ["Gross Lots", "BUY Lots", "SELL Lots", "Net Lots", "Floating P&L", "Swap", "Commission", "Net P&L"]:
+        view[col] = view[col].map(lambda x: f"{x:+,.2f}" if "P&L" in col or col in ("Net Lots",) else f"{x:,.2f}")
+    view["Gross Share %"] = view["Gross Share %"].map(lambda x: f"{x:.1f}%")
+    st.dataframe(view, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.markdown("### Directional Balance")
+    left, right = st.columns(2)
+    with left:
+        if gross:
+            buy_pct = buy / gross * 100.0
+            sell_pct = sell / gross * 100.0
+        else:
+            buy_pct = sell_pct = 0.0
+        st.metric("BUY share of gross", f"{buy_pct:.1f}%")
+        st.progress(min(max(buy_pct / 100.0, 0.0), 1.0))
+    with right:
+        st.metric("SELL share of gross", f"{sell_pct:.1f}%")
+        st.progress(min(max(sell_pct / 100.0, 0.0), 1.0))
+
+    if abs(net) < 1e-12:
+        st.info("Exposure ฝั่ง BUY และ SELL สมดุลกันตามจำนวน Lots")
+    elif net > 0:
+        st.info(f"Net Exposure = +{net:,.2f} lots → ฝั่ง BUY มากกว่า")
+    else:
+        st.info(f"Net Exposure = {net:,.2f} lots → ฝั่ง SELL มากกว่า")
 
 
 def page_open(pos: pd.DataFrame) -> None:
@@ -1011,7 +1106,7 @@ def page_journal(df: pd.DataFrame, store: NoteStore, aid: str) -> None:
 # MAIN
 # =========================================================
 
-NAV = ["📊 Dashboard", "🟡 ไม้ที่เปิดอยู่", "📓 Journal", "🔌 เชื่อมต่อบัญชี"]
+NAV = ["📊 Dashboard", "📐 Portfolio Exposure", "🟡 ไม้ที่เปิดอยู่", "📓 Journal", "🔌 เชื่อมต่อบัญชี"]
 
 
 def main() -> None:
@@ -1052,9 +1147,12 @@ def main() -> None:
             page_supabase_dashboard(fetch_latest_mt5_snapshot())
             return
         if page == NAV[1]:
+            page_exposure(fetch_latest_mt5_snapshot())
+            return
+        if page == NAV[2]:
             page_live_monitor(fetch_latest_mt5_snapshot())
             return
-        if page == NAV[3]:
+        if page == NAV[4]:
             st.subheader("🔌 MT5 Collector")
             st.success("Supabase เชื่อมต่อแล้ว — NobodyCollector กำลังส่งข้อมูลจาก MT5", icon="✅")
             st.code("MT5 → NobodyCollector → Supabase → Nobody Trade Journal", language="text")
@@ -1075,7 +1173,7 @@ def main() -> None:
         )
         st.stop()
 
-    if page == NAV[3]:
+    if page == NAV[4]:
         page_connect(token, region)
         return
 
@@ -1133,12 +1231,16 @@ def main() -> None:
     store = get_store()
     try:
         if page == NAV[1]:
+            # Exposure page is available only in the free MT5 -> Supabase path.
+            st.info("Portfolio Exposure ใช้ข้อมูล MT5 → Supabase; โหมด MetaApi เดิมยังไม่ได้เปิดหน้านี้")
+            return
+        if page == NAV[2]:
             page_open(fetch_positions(token, acc_region, aid))
             return
         with st.spinner("กำลังดึงประวัติเทรด..."):
             trades = fetch_history(token, acc_region, aid, days)
         df = merge_notes(trades, store.load(aid))
-        if page == NAV[2]:
+        if page == NAV[3]:
             page_journal(df, store, aid)
             return
         try:
