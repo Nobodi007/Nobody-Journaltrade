@@ -2720,8 +2720,69 @@ def _lifecycle_for_entry(entry: dict, exits: list[dict], position_snapshot: dict
     }
 
 
+def _candidate_entries_for_plan(plan: dict, entries: list[dict], used_tickets: set[str]) -> list[dict]:
+    """Return only entries that can legitimately belong to this locked plan.
+
+    Matching is deliberately conservative: GOLD/XAUUSD + M5, after lock time,
+    and the same LONG/SHORT direction. A direction mismatch is never silently
+    consumed by another plan just because it happened to be the next deal.
+    """
+    lock_time = pd.to_datetime(plan.get('locked_at'), utc=True, errors='coerce')
+    planned_dir = str(plan.get('direction') or '').upper()
+    out = []
+    for deal in entries:
+        ticket = str(deal.get('deal_ticket') or '').strip()
+        if not ticket or ticket in used_tickets:
+            continue
+        if not _gold_symbol_allowed(deal.get('symbol')):
+            continue
+        actual_dir = _compliance_direction(deal.get('deal_type'))
+        if planned_dir and actual_dir and planned_dir != actual_dir:
+            continue
+        if planned_dir and not actual_dir:
+            continue
+        deal_time = pd.to_datetime(deal.get('deal_time'), utc=True, errors='coerce')
+        if pd.isna(deal_time):
+            continue
+        if pd.notna(lock_time) and deal_time < lock_time:
+            continue
+        out.append(deal)
+    return out
+
+
+def _rank_plan_entry(plan: dict, deal: dict) -> tuple:
+    """Rank a candidate entry by price proximity first, then by time.
+
+    Planned Entry is the strongest matching hint available in the current
+    collector. If Entry/SL exist, distance is normalized by planned risk so
+    the score remains comparable across price levels. We still allow an
+    outside-FVG entry to match; that becomes DEVIATION rather than NO MATCH.
+    """
+    planned_entry = _num(plan.get('entry_price'), None)
+    actual_entry = _num(deal.get('price'), None)
+    planned_sl = _num(plan.get('stop_loss'), None)
+    price_score = 0.0
+    if planned_entry is not None and actual_entry is not None:
+        distance = abs(actual_entry - planned_entry)
+        risk = abs(planned_entry - planned_sl) if planned_sl is not None else None
+        price_score = distance / risk if risk and risk > 0 else distance
+    deal_time = pd.to_datetime(deal.get('deal_time'), utc=True, errors='coerce')
+    time_score = deal_time.value if pd.notna(deal_time) else 0
+    return (price_score, time_score)
+
+
 def _match_locked_plans(snapshot: dict) -> tuple[int, int, int]:
-    """Match LOCKED Gold/M5 plans to MT5 entries and then follow each position lifecycle."""
+    """Match LOCKED Gold/M5 plans to MT5 entries, then follow each lifecycle.
+
+    v3 matching rules:
+      1) only LOCKED GOLD/XAUUSD M5 plans are eligible;
+      2) entry must happen at/after locked_at;
+      3) symbol and LONG/SHORT direction must agree;
+      4) each entry deal can be consumed by only one plan;
+      5) when multiple valid candidates exist, closest planned Entry wins;
+      6) an entry outside FVG is still matched, then marked DEVIATION;
+      7) existing matches are never reassigned, only their lifecycle is refreshed.
+    """
     plans = fetch_trade_setup_plans(snapshot)
     locked = [
         p for p in plans
@@ -2738,68 +2799,58 @@ def _match_locked_plans(snapshot: dict) -> tuple[int, int, int]:
 
     existing_rows = _fetch_compliance_rows(snapshot)
     existing_by_setup = {str(x.get('setup_id')): x for x in existing_rows if x.get('setup_id')}
-    rows = history.to_dict('records')
     entries = _entry_deal_rows(history)
     exits = _exit_deal_rows(history)
 
-    # A plan consumes one entry deal. Existing compliance rows are authoritative.
     used_entry_tickets = {
         str(x.get('deal_ticket')) for x in existing_rows if str(x.get('deal_ticket') or '').strip()
     }
     matched = 0
     lifecycle_updates = 0
 
+    # Refresh lifecycle for already matched plans first. This keeps historical
+    # assignments immutable even when a new trade appears later.
     for plan in locked:
         setup_id = str(plan.get('setup_id') or '')
-        if not setup_id:
-            continue
-
-        # If already matched, refresh lifecycle instead of assigning another entry.
         existing = existing_by_setup.get(setup_id)
-        if existing:
-            entry_ticket = existing.get('deal_ticket')
-            entry = next((d for d in entries if str(d.get('deal_ticket')) == str(entry_ticket)), None)
-            if entry:
-                lifecycle = _lifecycle_for_entry(
-                    entry, exits, _find_position_snapshot(snapshot, existing.get('position_id')), plan
-                )
-                patch = {
-                    'actual_stop_loss': lifecycle.get('actual_stop_loss'),
-                    'actual_take_profit': lifecycle.get('actual_take_profit'),
-                    'lifecycle_status': lifecycle.get('lifecycle_status'),
-                    'exit_deal_ticket': lifecycle.get('exit_deal_ticket'),
-                    'exit_price': lifecycle.get('exit_price'),
-                    'exit_time': lifecycle.get('exit_time'),
-                    'realized_r': lifecycle.get('realized_r'),
-                    'evaluated_at': pd.Timestamp.now(tz='UTC').isoformat(),
-                }
-                ok, _ = _patch_compliance(setup_id, entry_ticket, patch)
-                if ok:
-                    lifecycle_updates += 1
+        if not existing:
+            continue
+        entry_ticket = existing.get('deal_ticket')
+        entry = next((d for d in entries if str(d.get('deal_ticket')) == str(entry_ticket)), None)
+        if not entry:
+            continue
+        lifecycle = _lifecycle_for_entry(
+            entry, exits, _find_position_snapshot(snapshot, existing.get('position_id')), plan
+        )
+        patch = {
+            'actual_stop_loss': lifecycle.get('actual_stop_loss'),
+            'actual_take_profit': lifecycle.get('actual_take_profit'),
+            'lifecycle_status': lifecycle.get('lifecycle_status'),
+            'exit_deal_ticket': lifecycle.get('exit_deal_ticket'),
+            'exit_price': lifecycle.get('exit_price'),
+            'exit_time': lifecycle.get('exit_time'),
+            'realized_r': lifecycle.get('realized_r'),
+            'evaluated_at': pd.Timestamp.now(tz='UTC').isoformat(),
+        }
+        ok, _ = _patch_compliance(setup_id, entry_ticket, patch)
+        if ok:
+            lifecycle_updates += 1
+
+    # Match new plans only after all existing assignments have been reserved.
+    for plan in sorted(locked, key=lambda p: pd.to_datetime(p.get('locked_at'), utc=True, errors='coerce').value if pd.notna(pd.to_datetime(p.get('locked_at'), utc=True, errors='coerce')) else 0):
+        setup_id = str(plan.get('setup_id') or '')
+        if not setup_id or setup_id in existing_by_setup:
             continue
 
-        lock_time = pd.to_datetime(plan.get('locked_at'), utc=True, errors='coerce')
-        candidates = []
-        for deal in entries:
-            ticket = str(deal.get('deal_ticket') or '')
-            if not ticket or ticket in used_entry_tickets:
-                continue
-            deal_time = pd.to_datetime(deal.get('deal_time'), utc=True, errors='coerce')
-            if pd.isna(deal_time):
-                continue
-            if pd.notna(lock_time) and deal_time < lock_time:
-                continue
-            if not _gold_symbol_allowed(deal.get('symbol')):
-                continue
-            candidates.append((deal_time, deal))
-        candidates.sort(key=lambda x: x[0])
+        candidates = _candidate_entries_for_plan(plan, entries, used_entry_tickets)
         if not candidates:
             continue
-
-        deal = candidates[0][1]
+        deal = min(candidates, key=lambda d: _rank_plan_entry(plan, d))
         deal_ticket = str(deal.get('deal_ticket'))
         status, reason = _evaluate_setup_plan(plan, deal)
-        lifecycle = _lifecycle_for_entry(deal, exits, _find_position_snapshot(snapshot, deal.get('position_id')), plan)
+        lifecycle = _lifecycle_for_entry(
+            deal, exits, _find_position_snapshot(snapshot, deal.get('position_id')), plan
+        )
         row = {
             'setup_id': setup_id,
             'login': plan.get('login') or snapshot.get('login'),
@@ -2839,7 +2890,7 @@ def _match_locked_plans(snapshot: dict) -> tuple[int, int, int]:
 
 def page_setup_compliance(snapshot: dict) -> None:
     st.markdown('<div class="nj-section-title">🛡️ Setup Compliance</div>', unsafe_allow_html=True)
-    st.caption('Gold Technical Model v1 · Locked Plan ↔ MT5 Trade · Compliance แยกจาก P&L · Full lifecycle v2')
+    st.caption('Gold Technical Model v1 · Locked Plan ↔ MT5 Trade · Compliance แยกจาก P&L · Matching Engine v3')
     if not snapshot or snapshot.get('_error'):
         st.warning('ยังไม่พบ Account Snapshot จาก Supabase')
         return
@@ -2879,11 +2930,12 @@ def page_setup_compliance(snapshot: dict) -> None:
                     and pd.to_datetime(d.get('deal_time'), utc=True, errors='coerce') >= lock_time
                     and _gold_symbol_allowed(d.get('symbol'))
                 ]
+                eligible = _candidate_entries_for_plan(plan, entries, set())
                 if eligible:
-                    d = eligible[0]
-                    st.warning(f"Plan {plan.get('setup_id')} พบ Gold Entry หลัง LOCK แล้ว: Deal {d.get('deal_ticket')} · {d.get('symbol')} · {d.get('deal_time')}")
+                    d = min(eligible, key=lambda x: _rank_plan_entry(plan, x))
+                    st.warning(f"Plan {plan.get('setup_id')} มี Entry ที่เข้าเงื่อนไข: Deal {d.get('deal_ticket')} · {d.get('symbol')} · {d.get('deal_time')} · {_compliance_direction(d.get('deal_type'))}")
                 else:
-                    st.caption(f"Plan {plan.get('setup_id')} · LOCK {plan.get('locked_at')} → ยังไม่มี GOLD Entry หลัง LOCK")
+                    st.caption(f"Plan {plan.get('setup_id')} · LOCK {plan.get('locked_at')} → ยังไม่มี GOLD Entry หลัง LOCK ที่ Direction ตรงกับแผน")
         else:
             st.caption('ยังไม่มี LOCKED Plan ที่เป็น GOLD/XAUUSD + M5')
         st.caption('ระบบจะจับคู่เฉพาะ GOLD/XAUUSD และ Entry deal ที่เกิดหลัง Plan ถูก LOCK')
