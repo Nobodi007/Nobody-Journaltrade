@@ -1275,6 +1275,210 @@ def _streaks(results: list[float]) -> tuple[int, int]:
     return best_w, best_l
 
 
+
+def _performance_breakdown_rows(history: pd.DataFrame) -> pd.DataFrame:
+    """Build completed-trade rows plus a best-effort position direction.
+
+    The baseline counts OUT/close deals. For BUY/SELL breakdown, prefer the
+    direction of the original IN deal for the same position_id so a SELL close
+    of a BUY position is not mislabeled as a SELL trade. If no matching IN
+    deal is available, fall back to the close deal direction.
+    """
+    trades = _trade_baseline_rows(history)
+    if trades.empty:
+        return trades
+
+    w = history.copy() if history is not None else pd.DataFrame()
+    if not w.empty:
+        if "entry_type" in w.columns:
+            et = w["entry_type"].astype(str).str.upper()
+            ins = w[et.isin(["IN", "INOUT", "OPEN"])].copy()
+        else:
+            ins = pd.DataFrame()
+
+        direction_map = {}
+        if not ins.empty and "position_id" in ins.columns and "deal_type" in ins.columns:
+            for _, r in ins.iterrows():
+                pid = r.get("position_id")
+                if pd.isna(pid):
+                    continue
+                d = str(r.get("deal_type", "")).upper()
+                if d in ("BUY", "SELL"):
+                    direction_map[str(pid)] = d
+
+        if "position_id" in trades.columns:
+            trades["trade_direction"] = trades["position_id"].apply(
+                lambda x: direction_map.get(str(x)) if not pd.isna(x) else None
+            )
+        else:
+            trades["trade_direction"] = None
+
+    if "trade_direction" not in trades.columns:
+        trades["trade_direction"] = None
+    fallback = trades.get("deal_type", pd.Series(index=trades.index, dtype=object)).astype(str).str.upper()
+    trades["trade_direction"] = trades["trade_direction"].where(
+        trades["trade_direction"].isin(["BUY", "SELL"]), fallback
+    )
+
+    if "deal_time" in trades.columns:
+        trades["deal_time"] = pd.to_datetime(trades["deal_time"], errors="coerce", utc=True)
+        # The collector stores MT5 server datetime without an explicit timezone.
+        # Keep the database timestamp as-is for grouping rather than pretending
+        # it is Bangkok local time.
+        trades["time_bucket"] = pd.cut(
+            trades["deal_time"].dt.hour,
+            bins=[-1, 6, 12, 18, 24],
+            labels=["00–06", "07–12", "13–18", "19–24"],
+        )
+        trades["day_of_week"] = trades["deal_time"].dt.day_name()
+    else:
+        trades["time_bucket"] = "Unknown"
+        trades["day_of_week"] = "Unknown"
+
+    return trades
+
+
+def _breakdown_metrics(df: pd.DataFrame) -> dict:
+    if df is None or df.empty:
+        return {
+            "trades": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
+            "gross_profit": 0.0, "gross_loss": 0.0, "net_pnl": 0.0,
+            "pf": None, "expectancy": 0.0,
+        }
+    r = pd.to_numeric(df["net_result"], errors="coerce").fillna(0.0)
+    wins = r[r > 0]
+    losses = r[r < 0]
+    gp = float(wins.sum())
+    gl = float(abs(losses.sum()))
+    return {
+        "trades": int(len(r)),
+        "wins": int((r > 0).sum()),
+        "losses": int((r < 0).sum()),
+        "win_rate": float((r > 0).mean() * 100) if len(r) else 0.0,
+        "gross_profit": gp,
+        "gross_loss": gl,
+        "net_pnl": float(r.sum()),
+        "pf": gp / gl if gl > 0 else None,
+        "expectancy": float(r.mean()) if len(r) else 0.0,
+    }
+
+
+def _breakdown_table(df: pd.DataFrame, key: str, label: str) -> pd.DataFrame:
+    rows = []
+    if df.empty or key not in df.columns:
+        return pd.DataFrame()
+    for value, g in df.groupby(key, dropna=False, observed=False):
+        name = "Unknown" if pd.isna(value) else str(value)
+        m = _breakdown_metrics(g)
+        rows.append({
+            label: name,
+            "Trades": m["trades"],
+            "Win Rate": m["win_rate"],
+            "Profit Factor": m["pf"],
+            "Net P&L": m["net_pnl"],
+            "Expectancy": m["expectancy"],
+            "Gross Profit": m["gross_profit"],
+            "Gross Loss": -m["gross_loss"],
+        })
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out = out.sort_values("Net P&L", ascending=False, kind="stable")
+    return out
+
+
+def page_performance_breakdown(snapshot: dict) -> None:
+    """Step 2: factual performance breakdown from the same completed trades."""
+    st.markdown('<div class="nj-section-title">Performance Breakdown</div>', unsafe_allow_html=True)
+    st.caption("Step 2 · แยก Performance ตาม Symbol / Direction / Time / Day · ใช้ Closed Trade ชุดเดียวกับ Step 1")
+
+    if not snapshot or snapshot.get("_error"):
+        st.warning("ยังไม่พบ Account Snapshot จาก Supabase")
+        return
+
+    history = fetch_mt5_history_supabase(snapshot)
+    trades = _performance_breakdown_rows(history)
+    if trades.empty:
+        st.info("ยังไม่มี Closed Trade สำหรับทำ Performance Breakdown")
+        return
+
+    st.markdown("### By Symbol")
+    symbol = _breakdown_table(trades, "symbol", "Symbol")
+    if symbol.empty:
+        st.info("ยังไม่มีข้อมูล Symbol")
+    else:
+        st.dataframe(symbol.style.format({
+            "Win Rate": "{:.2f}%",
+            "Profit Factor": lambda x: "—" if pd.isna(x) else f"{x:.2f}",
+            "Net P&L": "{:+,.2f}",
+            "Expectancy": "{:+,.2f}",
+            "Gross Profit": "{:+,.2f}",
+            "Gross Loss": "{:+,.2f}",
+        }), use_container_width=True, hide_index=True)
+
+    st.markdown("### By Direction")
+    st.caption("Direction พยายามอ้างจาก IN deal ของ position_id ก่อน; ถ้าจับคู่ไม่ได้จึงใช้ deal_type ของ close deal")
+    direction = _breakdown_table(trades, "trade_direction", "Direction")
+    if direction.empty:
+        st.info("ยังไม่มีข้อมูล Direction")
+    else:
+        st.dataframe(direction.style.format({
+            "Win Rate": "{:.2f}%",
+            "Profit Factor": lambda x: "—" if pd.isna(x) else f"{x:.2f}",
+            "Net P&L": "{:+,.2f}",
+            "Expectancy": "{:+,.2f}",
+            "Gross Profit": "{:+,.2f}",
+            "Gross Loss": "{:+,.2f}",
+        }), use_container_width=True, hide_index=True)
+
+    st.markdown("### By Time of Day")
+    st.caption("ใช้ timestamp ที่ Collector เก็บในฐานข้อมูล; ยังไม่แปลงเป็นเวลาไทย เพราะ MT5 collector เดิมไม่ได้บันทึก timezone ของ server")
+    time_order = ["00–06", "07–12", "13–18", "19–24"]
+    time_df = _breakdown_table(trades, "time_bucket", "Time")
+    if not time_df.empty:
+        time_df["_order"] = time_df["Time"].map({v:i for i,v in enumerate(time_order)}).fillna(99)
+        time_df = time_df.sort_values("_order").drop(columns="_order")
+        st.dataframe(time_df.style.format({
+            "Win Rate": "{:.2f}%",
+            "Profit Factor": lambda x: "—" if pd.isna(x) else f"{x:.2f}",
+            "Net P&L": "{:+,.2f}",
+            "Expectancy": "{:+,.2f}",
+            "Gross Profit": "{:+,.2f}",
+            "Gross Loss": "{:+,.2f}",
+        }), use_container_width=True, hide_index=True)
+
+    st.markdown("### By Day of Week")
+    day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    day_df = _breakdown_table(trades, "day_of_week", "Day")
+    if not day_df.empty:
+        day_df["_order"] = day_df["Day"].map({v:i for i,v in enumerate(day_order)}).fillna(99)
+        day_df = day_df.sort_values("_order").drop(columns="_order")
+        st.dataframe(day_df.style.format({
+            "Win Rate": "{:.2f}%",
+            "Profit Factor": lambda x: "—" if pd.isna(x) else f"{x:.2f}",
+            "Net P&L": "{:+,.2f}",
+            "Expectancy": "{:+,.2f}",
+            "Gross Profit": "{:+,.2f}",
+            "Gross Loss": "{:+,.2f}",
+        }), use_container_width=True, hide_index=True)
+
+    st.markdown("### Performance Concentration")
+    st.caption("ดูว่ากำไร/ขาดทุนสุทธิถูกสร้างหรือกระจุกอยู่ที่กลุ่มไหน โดยไม่ตีความว่าเป็นเหตุผลเชิงกลยุทธ์")
+    if not symbol.empty:
+        concentration = symbol[["Symbol", "Trades", "Net P&L", "Gross Profit", "Gross Loss"]].copy()
+        total_gp = float(concentration["Gross Profit"].sum())
+        total_gl = float(abs(concentration["Gross Loss"].sum()))
+        concentration["Gross Profit Share"] = (concentration["Gross Profit"] / total_gp * 100) if total_gp else 0.0
+        concentration["Gross Loss Share"] = (abs(concentration["Gross Loss"]) / total_gl * 100) if total_gl else 0.0
+        st.dataframe(concentration.style.format({
+            "Net P&L": "{:+,.2f}",
+            "Gross Profit": "{:+,.2f}",
+            "Gross Loss": "{:+,.2f}",
+            "Gross Profit Share": "{:.1f}%",
+            "Gross Loss Share": "{:.1f}%",
+        }), use_container_width=True, hide_index=True)
+
+    st.caption("Step 2 ยังเป็น descriptive statistics จากข้อมูลจริงเท่านั้น · ยังไม่ทำ AI inference, strategy scoring, prediction หรือ recommendation")
+
 def page_performance_baseline(snapshot: dict) -> None:
     """Step 1: factual trading-performance baseline from MT5 deal history."""
     st.markdown('<div class="nj-section-title">Trading Performance Baseline</div>', unsafe_allow_html=True)
@@ -1478,7 +1682,7 @@ def page_journal(df: pd.DataFrame, store: NoteStore, aid: str) -> None:
 # MAIN
 # =========================================================
 
-NAV = ["📊 Dashboard", "📈 Trading Performance", "📐 Portfolio Exposure", "🛡️ Risk Engine", "🧠 Decision Engine", "🟡 ไม้ที่เปิดอยู่", "📓 Journal", "🔌 เชื่อมต่อบัญชี"]
+NAV = ["📊 Dashboard", "📈 Trading Performance", "📊 Performance Breakdown", "📐 Portfolio Exposure", "🛡️ Risk Engine", "🧠 Decision Engine", "🟡 ไม้ที่เปิดอยู่", "📓 Journal", "🔌 เชื่อมต่อบัญชี"]
 
 
 def main() -> None:
@@ -1522,18 +1726,21 @@ def main() -> None:
             page_performance_baseline(fetch_latest_mt5_snapshot())
             return
         if page == NAV[2]:
-            page_exposure(fetch_latest_mt5_snapshot())
+            page_performance_breakdown(fetch_latest_mt5_snapshot())
             return
         if page == NAV[3]:
-            page_risk_engine(fetch_latest_mt5_snapshot())
+            page_exposure(fetch_latest_mt5_snapshot())
             return
         if page == NAV[4]:
-            page_decision_engine(fetch_latest_mt5_snapshot())
+            page_risk_engine(fetch_latest_mt5_snapshot())
             return
         if page == NAV[5]:
+            page_decision_engine(fetch_latest_mt5_snapshot())
+            return
+        if page == NAV[6]:
             page_live_monitor(fetch_latest_mt5_snapshot())
             return
-        if page == NAV[7]:
+        if page == NAV[8]:
             st.subheader("🔌 MT5 Collector")
             st.success("Supabase เชื่อมต่อแล้ว — NobodyCollector กำลังส่งข้อมูลจาก MT5", icon="✅")
             st.code("MT5 → NobodyCollector → Supabase → Nobody Trade Journal", language="text")
@@ -1554,7 +1761,7 @@ def main() -> None:
         )
         st.stop()
 
-    if page == NAV[7]:
+    if page == NAV[8]:
         page_connect(token, region)
         return
 
@@ -1610,18 +1817,17 @@ def main() -> None:
 
     acc_region = acc.get("region") or region
     store = get_store()
+    if page in (NAV[1], NAV[2], NAV[3], NAV[4], NAV[5]):
+        st.info("หน้านี้ใช้ข้อมูล MT5 → Supabase ในโหมด Free Architecture; กรุณาใช้โหมด Supabase")
+        return
     try:
-        if page == NAV[2]:
-            # Exposure page is available only in the free MT5 -> Supabase path.
-            st.info("Portfolio Exposure ใช้ข้อมูล MT5 → Supabase; โหมด MetaApi เดิมยังไม่ได้เปิดหน้านี้")
-            return
-        if page == NAV[5]:
+        if page == NAV[6]:
             page_open(fetch_positions(token, acc_region, aid))
             return
         with st.spinner("กำลังดึงประวัติเทรด..."):
             trades = fetch_history(token, acc_region, aid, days)
         df = merge_notes(trades, store.load(aid))
-        if page == NAV[6]:
+        if page == NAV[7]:
             page_journal(df, store, aid)
             return
         try:
