@@ -1919,36 +1919,12 @@ def _setup_patch_locked(setup_id: str) -> tuple[bool, str]:
         return False, str(exc)
 
 
-def _setup_soft_delete(setup_id: str) -> tuple[bool, str]:
-    """Hide a PLANNED test/setup from the plan list without hard-deleting audit data.
-
-    Only PLANNED rows can be deleted. LOCKED plans are intentionally protected.
-    This uses the existing UPDATE permission, so no new Supabase DELETE policy is required.
-    """
-    base_url, api_key = get_supabase_config()
-    if not base_url or not api_key:
-        return False, "ยังไม่ได้ตั้งค่า Supabase"
-    try:
-        r = requests.patch(
-            f"{base_url}/rest/v1/trade_setup_plans",
-            params={"setup_id": f"eq.{setup_id}", "status": "eq.PLANNED"},
-            headers=_supabase_headers(api_key, True),
-            json={"status": "DELETED"},
-            timeout=10,
-        )
-        if r.status_code not in (200, 204):
-            return False, f"Supabase HTTP={r.status_code}: {r.text[:500]}"
-        return True, "ลบแผนออกจากรายการแล้ว"
-    except Exception as exc:
-        return False, str(exc)
-
-
 @st.cache_data(ttl=5, show_spinner=False)
 def fetch_trade_setup_plans(snapshot: dict) -> list[dict]:
     base_url, api_key = get_supabase_config()
     if not base_url or not api_key:
         return []
-    params = [("select", "*"), ("status", "neq.DELETED"), ("order", "created_at.desc"), ("limit", "50")]
+    params = [("select", "*"), ("order", "created_at.desc"), ("limit", "50")]
     if snapshot.get("login") not in (None, ""):
         params.append(("login", f"eq.{snapshot.get('login')}"))
     if snapshot.get("server") not in (None, ""):
@@ -1968,116 +1944,90 @@ def fetch_trade_setup_plans(snapshot: dict) -> list[dict]:
         return []
 
 
+@st.cache_data(ttl=5, show_spinner=False)
+def fetch_gold_m5_candles(limit: int = 600) -> list[dict]:
+    """Read XAUUSD M5 candles server-side so the workspace does not depend on CDN JS."""
+    base_url, api_key = get_supabase_config()
+    if not base_url or not api_key:
+        return []
+    headers = {"apikey": api_key, "Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+    params = {
+        "select": "time_unix,open,high,low,close,volume",
+        "symbol": "eq.XAUUSD",
+        "timeframe": "eq.M5",
+        "order": "time_unix.desc",
+        "limit": str(limit),
+    }
+    try:
+        r = requests.get(f"{base_url}/rest/v1/mt5_gold_m5_candles", headers=headers, params=params, timeout=10)
+        r.raise_for_status()
+        rows = r.json()
+        if not isinstance(rows, list):
+            return []
+        out = []
+        for x in reversed(rows):
+            try:
+                out.append({"time": int(x["time_unix"]), "open": float(x["open"]), "high": float(x["high"]), "low": float(x["low"]), "close": float(x["close"]), "volume": float(x.get("volume") or 0)})
+            except Exception:
+                pass
+        return out
+    except Exception:
+        return []
+
+
 def render_gold_tradingview_chart() -> None:
-    """Gold M5 workspace using free TradingView Lightweight Charts + persistent drawings."""
+    """Gold-only TradingView Advanced Chart with the full dark analysis UI."""
     st.markdown(
         """
         <div class="gold-workspace-head">
           <div>
-            <div class="gold-workspace-title">📈 Gold Trading Workspace · Persistent</div>
-            <div class="gold-workspace-subtitle">XAUUSD · M5 · EMA200 · Volume · X / IDM / BOS / FVG drawings</div>
+            <div class="gold-workspace-title">📈 Gold Trading Workspace</div>
+            <div class="gold-workspace-subtitle">XAUUSD · M5 · TradingView สำหรับวิเคราะห์ X / IDM / BOS / FVG</div>
           </div>
-          <div class="gold-workspace-badge">● MT5 → Supabase · DRAWINGS SAVED</div>
+          <div class="gold-workspace-badge">● PEPPERSTONE · XAUUSD</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    base_url, api_key = get_supabase_config()
-    snapshot = fetch_latest_mt5_snapshot()
-    login = str(snapshot.get("login") or "").strip()
-    server = str(snapshot.get("server") or "").strip()
-    if not base_url or not api_key:
-        st.error("ยังไม่มี SUPABASE_URL / SUPABASE_KEY ใน Streamlit Secrets")
-        return
-    if not login or not server:
-        st.warning("ยังไม่พบ MT5 account snapshot — กราฟจะรอข้อมูล M5 จาก NobodyCollector")
+    # Official TradingView Advanced Chart widget settings.
+    chart_html = r'''
+    <div id="tv-gold-workspace" style="width:100%;height:560px;background:#0b0d10;border:1px solid #242a33;border-radius:14px;overflow:hidden;">
+      <div class="tradingview-widget-container" style="width:100%;height:100%;">
+        <div class="tradingview-widget-container__widget" style="width:100%;height:100%;"></div>
+        <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js?v=gold-workspace-v3" async>
+        {
+          "autosize": true,
+          "symbol": "PEPPERSTONE:XAUUSD",
+          "interval": "5",
+          "timezone": "Asia/Bangkok",
+          "theme": "dark",
+          "style": "1",
+          "locale": "en",
+          "backgroundColor": "#0b0d10",
+          "gridColor": "rgba(70,78,90,0.24)",
+          "allow_symbol_change": false,
+          "hide_side_toolbar": false,
+          "hide_top_toolbar": false,
+          "hide_legend": false,
+          "hide_volume": false,
+          "withdateranges": true,
+          "calendar": false,
+          "details": false,
+          "hotlist": false,
+          "watchlist": [],
+          "compareSymbols": [],
+          "save_image": true,
+          "show_popup_button": false,
+          "studies": ["MAExp@tv-basicstudies"],
+          "support_host": "https://www.tradingview.com"
+        }
+        </script>
+      </div>
+    </div>
+    '''
 
-    workspace_key = f"{login}|{server}|XAUUSD|M5"
-    payload = {
-        "supabaseUrl": base_url,
-        "supabaseKey": api_key,
-        "workspaceKey": workspace_key,
-        "login": login,
-        "server": server,
-    }
-    payload_json = json.dumps(payload).replace("</", "<\\/")
-
-    chart_html = r'''<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-*{box-sizing:border-box}html,body{margin:0;background:#0b0d10;color:#e7edf5;font-family:Inter,Arial,sans-serif;overflow:hidden}
-#shell{height:900px;border:1px solid #252c37;border-radius:14px;overflow:hidden;background:#0b0d10;display:flex;flex-direction:column}
-#bar{height:54px;min-height:54px;display:flex;align-items:center;gap:7px;padding:8px 10px;border-bottom:1px solid #242b36;background:#11151c}
-.title{font-weight:800;font-size:14px;margin-right:8px;white-space:nowrap}.muted{color:#8490a2;font-size:11px;margin-left:auto;white-space:nowrap}
-button{border:1px solid #303846;background:#181e27;color:#dbe3ed;border-radius:7px;padding:7px 9px;font-size:11px;cursor:pointer}button:hover{border-color:#65738a;background:#202733}
-button.active{border-color:#6f9cff;background:#243554;color:#fff}.danger{border-color:#69343d}.save{border-color:#285d49}
-#tools{display:flex;gap:5px;align-items:center}.sep{width:1px;height:25px;background:#2a313c;margin:0 3px}.sw{width:20px;height:20px;padding:0;border-radius:50%}.sw[data-c="#78a9ff"]{background:#78a9ff}.sw[data-c="#ff6174"]{background:#ff6174}.sw[data-c="#20d68a"]{background:#20d68a}.sw[data-c="#f2c94c"]{background:#f2c94c}
-#chart{position:relative;flex:1;min-height:0}.empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#697587;font-size:13px;pointer-events:none}
-#status{height:27px;min-height:27px;border-top:1px solid #242b36;padding:6px 10px;color:#7f8b9d;font-size:10px;background:#10141b}.ok{color:#7ed9ad}.bad{color:#ff8a98}
-</style></head><body>
-<div id="shell"><div id="bar"><div class="title">XAUUSD · M5</div>
-<div id="tools">
-<button data-tool="cursor" class="active">↖ Cursor</button><button data-tool="hline">─ H-Line</button><button data-tool="trend">／ Trendline</button>
-<span class="sep"></span><button class="sw" data-c="#78a9ff" title="Blue"></button><button class="sw" data-c="#ff6174" title="Red"></button><button class="sw" data-c="#20d68a" title="Green"></button><button class="sw" data-c="#f2c94c" title="Yellow"></button>
-<span class="sep"></span><button id="undo">↶ Undo</button><button id="clear" class="danger">Clear</button><button id="save" class="save">Save</button>
-</div><div class="muted">Free · TradingView Lightweight Charts · drawings sync to Supabase</div></div>
-<div id="chart"><div class="empty" id="empty">รอข้อมูล XAUUSD M5 จาก NobodyCollector...</div></div><div id="status">กำลังโหลด...</div></div>
-<script src="https://unpkg.com/lightweight-charts@5.0.0/dist/lightweight-charts.standalone.production.js"></script>
-<script>
-const CFG = __CONFIG__;
-const $=id=>document.getElementById(id); const status=$('status');
-const key=`nj_gold_drawings_${CFG.workspaceKey}`;
-let drawings=[]; let history=[]; let tool='cursor'; let color='#78a9ff'; let firstPoint=null; let selectedId=null;
-const chart=LWC.createChart($('chart'),{layout:{background:{type:'solid',color:'#0b0d10'},textColor:'#aeb8c7'},grid:{vertLines:{color:'rgba(70,78,90,.20)'},horzLines:{color:'rgba(70,78,90,.20)'}},rightPriceScale:{borderColor:'#303743'},timeScale:{borderColor:'#303743',timeVisible:true,secondsVisible:false},crosshair:{mode:1}});
-const candles=chart.addSeries(LWC.CandlestickSeries,{upColor:'#20d68a',downColor:'#ff6174',borderUpColor:'#20d68a',borderDownColor:'#ff6174',wickUpColor:'#20d68a',wickDownColor:'#ff6174'});
-const volume=chart.addSeries(LWC.HistogramSeries,{priceFormat:{type:'volume'},priceScaleId:'volume',color:'rgba(120,169,255,.35)'});
-chart.priceScale('volume').applyOptions({scaleMargins:{top:.78,bottom:0}});
-const ema=chart.addSeries(LWC.LineSeries,{color:'#78a9ff',lineWidth:2,priceLineVisible:false,lastValueVisible:false});
-const overlay=document.createElement('canvas'); overlay.style.cssText='position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:4'; $('chart').appendChild(overlay); const ctx=overlay.getContext('2d');
-function resize(){overlay.width=$('chart').clientWidth*devicePixelRatio;overlay.height=$('chart').clientHeight*devicePixelRatio;ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0); chart.resize($('chart').clientWidth,$('chart').clientHeight); drawOverlay()}
-new ResizeObserver(resize).observe($('chart'));
-function fmtStatus(t,ok=true){status.textContent=t;status.className=ok?'ok':'bad'}
-function calcEMA(rows,n=200){let out=[],k=2/(n+1),prev=null;for(const r of rows){prev=prev==null?r.close:r.close*k+prev*(1-k);out.push({time:r.time,value:prev})}return out}
-async function loadCandles(){
- try{
-  const headers={apikey:CFG.supabaseKey,Authorization:`Bearer ${CFG.supabaseKey}`};
-  const base=`${CFG.supabaseUrl}/rest/v1/mt5_gold_m5_candles?select=time_unix,open,high,low,close,volume&symbol=eq.XAUUSD&timeframe=eq.M5&order=time.asc&limit=1200`;
-  let mode='account';
-  let q=`${base}&login=eq.${encodeURIComponent(CFG.login)}&server=eq.${encodeURIComponent(CFG.server)}`;
-  let r=await fetch(q,{headers});
-  if(!r.ok) throw new Error(`HTTP ${r.status}`);
-  let rows=await r.json();
-  // Fallback: if the collector wrote valid XAUUSD/M5 rows but the account/server
-  // metadata differs, still render the candle feed instead of leaving the chart blank.
-  if(!Array.isArray(rows)||rows.length===0){
-    mode='symbol';
-    r=await fetch(base,{headers});
-    if(!r.ok) throw new Error(`HTTP ${r.status}`);
-    rows=await r.json();
-  }
-  const data=rows.map(x=>({time:Number(x.time_unix),open:+x.open,high:+x.high,low:+x.low,close:+x.close,volume:+(x.volume||0)})).filter(x=>Number.isFinite(x.time)&&Number.isFinite(x.close));
-  candles.setData(data.map(({time,open,high,low,close})=>({time,open,high,low,close})));
-  volume.setData(data.map(x=>({time:x.time,value:x.volume,color:x.close>=x.open?'rgba(32,214,138,.28)':'rgba(255,97,116,.28)'})));
-  ema.setData(calcEMA(data));
-  $('empty').style.display=data.length?'none':'flex';
-  chart.timeScale().fitContent();
-  fmtStatus(data.length?`M5 candles: ${data.length.toLocaleString()} · EMA200 · Volume${mode==='symbol'?' · fallback feed':''}`:'ยังไม่มี XAUUSD M5 candle ใน Supabase',!!data.length);
- }catch(e){$('empty').style.display='flex';fmtStatus(`โหลด candle ไม่สำเร็จ: ${e.message}`,false)} }
-function p2xy(p){if(!p)return null;const x=chart.timeScale().timeToCoordinate(p.time);const y=chart.priceScale('right').priceToCoordinate(p.price);return x==null||y==null?null:{x,y}}
-function xy2p(x,y){const t=chart.timeScale().coordinateToTime(x);const pr=chart.priceScale('right').coordinateToPrice(y);return t==null||pr==null?null:{time:Number(t),price:Number(pr)} }
-function drawOverlay(){const w=$('chart').clientWidth,h=$('chart').clientHeight;ctx.clearRect(0,0,w,h);for(const d of drawings){ctx.strokeStyle=d.color;ctx.lineWidth=d.id===selectedId?3:2;ctx.setLineDash(d.type==='hline'?[7,5]:[]);if(d.type==='hline'){const a=p2xy({time:d.time,price:d.price});if(a){ctx.beginPath();ctx.moveTo(0,a.y);ctx.lineTo(w,a.y);ctx.stroke()}}else if(d.type==='trend'){const a=p2xy(d.a),b=p2xy(d.b);if(a&&b){ctx.setLineDash([]);ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke()}}}ctx.setLineDash([])}
-function pushHistory(){history.push(JSON.stringify(drawings));if(history.length>30)history.shift()}
-function addDrawing(d){pushHistory();d.id=crypto.randomUUID();drawings.push(d);selectedId=d.id;drawOverlay();persist()}
-function persistLocal(){localStorage.setItem(key,JSON.stringify(drawings))}
-async function persist(){persistLocal(); try{const url=`${CFG.supabaseUrl}/rest/v1/gold_chart_drawings?on_conflict=workspace_key`;const body={workspace_key:CFG.workspaceKey,login:CFG.login||null,server:CFG.server||null,symbol:'XAUUSD',timeframe:'M5',drawings};const r=await fetch(url,{method:'POST',headers:{apikey:CFG.supabaseKey,Authorization:`Bearer ${CFG.supabaseKey}`,'Content-Type':'application/json',Prefer:'resolution=merge-duplicates,return=minimal'},body:JSON.stringify(body)});if(!r.ok)throw new Error(`HTTP ${r.status}`);fmtStatus(`บันทึกแล้ว · ${new Date().toLocaleTimeString('th-TH')}`,true)}catch(e){fmtStatus(`Supabase save ไม่สำเร็จ · เก็บ local backup แล้ว`,false)}}
-async function restore(){try{const q=`${CFG.supabaseUrl}/rest/v1/gold_chart_drawings?select=drawings&workspace_key=eq.${encodeURIComponent(CFG.workspaceKey)}&limit=1`;const r=await fetch(q,{headers:{apikey:CFG.supabaseKey,Authorization:`Bearer ${CFG.supabaseKey}`}});if(r.ok){const a=await r.json();if(a[0]?.drawings?.length){drawings=a[0].drawings;drawOverlay();fmtStatus(`กู้ drawing จาก Supabase แล้ว · ${drawings.length} รายการ`,true);return}}}catch(e){}try{const raw=localStorage.getItem(key);if(raw){drawings=JSON.parse(raw)||[];drawOverlay();fmtStatus(`กู้ drawing จาก browser backup แล้ว · ${drawings.length} รายการ`,true);return}}catch(e){}fmtStatus('พร้อมใช้งาน · ยังไม่มี drawing ที่บันทึกไว้',true)}
-$('tools').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.tool){tool=b.dataset.tool;firstPoint=null;document.querySelectorAll('[data-tool]').forEach(x=>x.classList.toggle('active',x===b));return}if(b.dataset.c){color=b.dataset.c;return}if(b.id==='undo'){if(!history.length)return;drawings=JSON.parse(history.pop());selectedId=null;drawOverlay();persist();return}if(b.id==='clear'){if(!drawings.length)return;pushHistory();drawings=[];selectedId=null;drawOverlay();persist();return}if(b.id==='save')persist()});
-$('chart').addEventListener('click',e=>{const r=overlay.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top,p=xy2p(x,y);if(!p)return;if(tool==='hline'){addDrawing({type:'hline',time:p.time,price:p.price,color});return}if(tool==='trend'){if(!firstPoint){firstPoint=p;fmtStatus('Trendline: คลิกจุดที่สอง',true)}else{addDrawing({type:'trend',a:firstPoint,b:p,color});firstPoint=null;fmtStatus('เพิ่ม Trendline แล้ว',true)}}});
-chart.subscribeCrosshairMove(drawOverlay); chart.timeScale().subscribeVisibleTimeRangeChange(drawOverlay); loadCandles().then(restore); window.addEventListener('resize',resize); setInterval(loadCandles,30000);
-</script></body></html>'''
-    chart_html = chart_html.replace('__CONFIG__', payload_json)
-    components.html(chart_html, height=925, scrolling=False)
+    components.html(chart_html, height=580, scrolling=False)
 
     st.markdown(
         """
@@ -2086,7 +2036,6 @@ chart.subscribeCrosshairMove(drawOverlay); chart.timeScale().subscribeVisibleTim
           <div>
             <b>Gold Technical Model v1</b>
             <span>M5 Close → EMA200 → X/IDM → BOS → BOS Swing → FVG → Retrace → Entry</span>
-            <span>Drawing: H-Line / Trendline · สี · Undo · Clear · Auto-save → Supabase</span>
           </div>
         </div>
         """,
@@ -2143,32 +2092,18 @@ def page_new_trade_setup(snapshot: dict) -> None:
         view = pd.DataFrame(plans)
         cols = [c for c in ["setup_id", "symbol", "direction", "timeframe", "trend_state", "planned_rr", "status", "created_at", "locked_at"] if c in view.columns]
         st.dataframe(view[cols], use_container_width=True, hide_index=True)
-        st.caption("📝 PLANNED = แก้/ลบได้ · 🔒 LOCKED = ล็อกแล้วและจะไม่ให้ลบ เพื่อรักษาประวัติการวางแผน")
         for p in plans[:10]:
             sid = str(p.get("setup_id", ""))
             status = str(p.get("status", ""))
             if status == "PLANNED" and sid:
-                b1, b2 = st.columns([1, 1])
-                with b1:
-                    if st.button(f"🔒 Lock {sid}", key=f"lock_setup_{sid}", use_container_width=True):
-                        ok, msg = _setup_patch_locked(sid)
-                        if ok:
-                            st.success(msg)
-                            fetch_trade_setup_plans.clear()
-                            st.rerun()
-                        else:
-                            st.error(msg)
-                with b2:
-                    if st.button(f"🗑️ ลบ {sid}", key=f"delete_setup_{sid}", use_container_width=True):
-                        ok, msg = _setup_soft_delete(sid)
-                        if ok:
-                            st.success(msg)
-                            fetch_trade_setup_plans.clear()
-                            st.rerun()
-                        else:
-                            st.error(msg)
-            elif status == "LOCKED" and sid:
-                st.info(f"🔒 {sid} — LOCKED: ลบไม่ได้ เพื่อรักษาประวัติการวางแผน")
+                if st.button(f"🔒 Lock {sid}", key=f"lock_setup_{sid}", use_container_width=False):
+                    ok, msg = _setup_patch_locked(sid)
+                    if ok:
+                        st.success(msg)
+                        fetch_trade_setup_plans.clear()
+                        st.rerun()
+                    else:
+                        st.error(msg)
     else:
         st.info("ยังไม่มี Trade Setup ที่บันทึกไว้")
 
