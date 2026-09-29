@@ -59,31 +59,171 @@ st.markdown(CSS, unsafe_allow_html=True)
 
 APP_UI_CSS = r"""
 <style>
-.block-container { padding-top: 1.25rem !important; }
-.nj-app-title { font-size:1.05rem; font-weight:800; margin:0; }
-.nj-app-sub { color:#8b93a1; font-size:.75rem; margin-top:2px; }
-.nj-nav-label { color:#737d8c; text-transform:uppercase; letter-spacing:.08em; font-size:.67rem; font-weight:800; margin:.8rem 0 .35rem; }
-.nj-hero { background:linear-gradient(135deg,#232b3a,#181a20); border:1px solid #303744; border-radius:16px; padding:22px 24px; margin-bottom:18px; }
-.nj-hero h2 { margin:0 0 6px; font-size:1.5rem; }
-.nj-hero p { margin:0; color:#9aa3b2; line-height:1.55; }
-.nj-empty-icon { font-size:2.1rem; margin-bottom:4px; }
-.nj-status { display:inline-flex; align-items:center; gap:7px; padding:5px 10px; border-radius:999px; background:rgba(14,203,129,.12); color:#0ecb81; border:1px solid rgba(14,203,129,.24); font-size:.74rem; font-weight:700; }
-.nj-dot { width:7px; height:7px; border-radius:50%; background:#0ecb81; display:inline-block; }
-.nj-side-card { background:#181a20; border:1px solid #2b3139; border-radius:12px; padding:11px 12px; margin:8px 0; }
-.nj-side-muted { color:#7f8897; font-size:.72rem; }
-.nj-side-value { font-size:.9rem; font-weight:750; margin-top:2px; }
-section[data-testid="stSidebar"] { border-right:1px solid #292e38; }
-section[data-testid="stSidebar"] .block-container { padding:1.15rem .85rem 1.2rem !important; }
-section[data-testid="stSidebar"] [data-testid="stRadio"] label { border-radius:10px; padding:7px 9px !important; }
-section[data-testid="stSidebar"] [data-testid="stRadio"] label:hover { background:#20242d; }
-section[data-testid="stSidebar"] [data-testid="stRadio"] p { font-size:.9rem; font-weight:650; }
-[data-testid="stMetric"] { background:#181a20; border:1px solid #2b3139; border-radius:12px; padding:12px 14px; }
-@media (max-width:900px) {
-  .block-container { padding:.7rem .65rem 3rem !important; }
-  .nj-hero { padding:16px; }
+/* =========================================================
+   Nobody Trade Journal — UI ONLY
+   No data / API / trading logic changes.
+   ========================================================= */
+:root {
+  --nj-bg:#0d1015;
+  --nj-panel:#151922;
+  --nj-panel-2:#191e28;
+  --nj-border:#29303c;
+  --nj-border-soft:#202631;
+  --nj-text:#eef2f7;
+  --nj-muted:#8d97a8;
+  --nj-green:#20d68a;
+  --nj-red:#ff6174;
+  --nj-blue:#78a9ff;
+}
+
+/* Main canvas */
+.block-container {
+  max-width: 1480px !important;
+  padding: 1.55rem 2.2rem 3.5rem !important;
+}
+[data-testid="stAppViewContainer"] { background:var(--nj-bg); }
+[data-testid="stHeader"] { background:transparent !important; }
+
+/* Typography */
+.nj-app-title { font-size:1.08rem; font-weight:850; letter-spacing:-.02em; margin:0; color:var(--nj-text); }
+.nj-app-sub { color:var(--nj-muted); font-size:.72rem; margin-top:3px; }
+.nj-section-title { font-size:1.55rem; font-weight:820; letter-spacing:-.025em; margin:.15rem 0 .2rem; color:var(--nj-text); }
+.nj-nav-label { color:#697486; text-transform:uppercase; letter-spacing:.11em; font-size:.64rem; font-weight:850; margin:1rem 0 .45rem; }
+.nj-muted { color:var(--nj-muted); font-size:.72rem; }
+
+/* Sidebar */
+section[data-testid="stSidebar"] {
+  background:#10131a !important;
+  border-right:1px solid #252b35;
+}
+section[data-testid="stSidebar"] .block-container {
+  padding:1.25rem .85rem 1.4rem !important;
+}
+section[data-testid="stSidebar"] [data-testid="stRadio"] > div {
+  gap:5px !important;
+}
+section[data-testid="stSidebar"] [data-testid="stRadio"] label {
+  min-height:40px !important;
+  border:1px solid transparent !important;
+  border-radius:11px !important;
+  padding:8px 11px !important;
+  transition:background .15s ease,border-color .15s ease;
+}
+section[data-testid="stSidebar"] [data-testid="stRadio"] label:hover {
+  background:#1b202a !important;
+  border-color:#282f3a !important;
+}
+section[data-testid="stSidebar"] [data-testid="stRadio"] p {
+  font-size:.88rem !important;
+  font-weight:680 !important;
+}
+section[data-testid="stSidebar"] hr { border-color:#272d37 !important; margin:.9rem 0 !important; }
+
+.nj-side-card {
+  background:linear-gradient(145deg,#171b23,#13161d);
+  border:1px solid var(--nj-border-soft);
+  border-radius:12px;
+  padding:11px 12px;
+  margin:8px 0;
+}
+.nj-side-muted { color:#737e90; font-size:.66rem; letter-spacing:.08em; font-weight:750; }
+.nj-side-value { color:#e8edf4; font-size:.83rem; font-weight:720; margin-top:3px; line-height:1.35; }
+
+/* Cards / hero */
+.nj-hero {
+  background:radial-gradient(circle at top right,rgba(83,126,205,.14),transparent 38%),linear-gradient(145deg,#1a202b,#12151c);
+  border:1px solid #2a3240;
+  border-radius:18px;
+  padding:25px 27px;
+  margin:0 0 20px;
+  box-shadow:0 10px 35px rgba(0,0,0,.14);
+}
+.nj-hero h2 { margin:0 0 7px; font-size:1.48rem; letter-spacing:-.02em; }
+.nj-hero p { margin:0; color:#9aa5b6; line-height:1.6; }
+.nj-empty-icon { font-size:2rem; margin-bottom:5px; }
+.nj-status { display:inline-flex; align-items:center; gap:7px; padding:5px 10px; border-radius:999px; background:rgba(32,214,138,.1); color:var(--nj-green); border:1px solid rgba(32,214,138,.22); font-size:.72rem; font-weight:750; }
+.nj-dot { width:7px; height:7px; border-radius:50%; background:var(--nj-green); display:inline-block; box-shadow:0 0 9px rgba(32,214,138,.55); }
+
+/* Metrics */
+[data-testid="stMetric"] {
+  background:linear-gradient(145deg,#171b23,#141820) !important;
+  border:1px solid var(--nj-border) !important;
+  border-radius:14px !important;
+  padding:13px 15px !important;
+  min-height:82px;
+}
+[data-testid="stMetricLabel"] { color:#8b95a6 !important; font-size:.73rem !important; }
+[data-testid="stMetricValue"] { color:#f0f3f8 !important; font-weight:780 !important; letter-spacing:-.025em; }
+[data-testid="stMetricDelta"] { font-size:.72rem !important; }
+
+/* Open-position cards */
+.nj-card {
+  background:#151922;
+  border:1px solid #29313e;
+  border-radius:14px;
+  padding:14px 15px;
+  margin:9px 0;
+}
+.nj-open { transition:transform .12s ease,border-color .12s ease,background .12s ease; }
+.nj-open:hover { transform:translateY(-1px); border-color:#394454; background:#171c25; }
+.nj-tag {
+  display:inline-block;
+  padding:3px 7px;
+  border-radius:7px;
+  background:#202632;
+  color:#b9c4d4;
+  font-size:.67rem;
+  font-weight:750;
+}
+.nj-pos,.nj-win { color:var(--nj-green) !important; }
+.nj-neg,.nj-loss { color:var(--nj-red) !important; }
+
+/* Buttons / controls */
+.stButton > button {
+  border-radius:10px !important;
+  border-color:#303846 !important;
+  min-height:38px !important;
+  font-weight:680 !important;
+}
+.stButton > button:hover { border-color:#536176 !important; }
+.stTextInput input,.stTextArea textarea,.stSelectbox [data-baseweb="select"] > div,.stMultiSelect [data-baseweb="select"] > div {
+  border-radius:10px !important;
+}
+
+/* Tables */
+[data-testid="stDataFrame"] {
+  border:1px solid #28303b;
+  border-radius:12px;
+  overflow:hidden;
+}
+
+/* Reduce excess Streamlit vertical gaps */
+[data-testid="stVerticalBlock"] { gap:.55rem; }
+
+/* Mobile */
+@media (max-width: 900px) {
+  .block-container { padding:.85rem .8rem 4rem !important; }
+  .nj-section-title { font-size:1.28rem; }
+  .nj-hero { padding:18px 16px; border-radius:15px; }
   .nj-hero h2 { font-size:1.2rem; }
-  [data-testid="stMetric"] { padding:9px 10px; }
-  [data-testid="stMetricValue"] { font-size:1.05rem !important; }
+  [data-testid="stMetric"] { min-height:70px; padding:9px 10px !important; }
+  [data-testid="stMetricValue"] { font-size:1.02rem !important; }
+  [data-testid="stMetricLabel"] { font-size:.66rem !important; }
+  .nj-card { padding:12px 11px; }
+  .nj-open .stColumn { min-width:0 !important; }
+  .nj-open [data-testid="stMarkdownContainer"] { overflow-wrap:anywhere; }
+  section[data-testid="stSidebar"] .block-container { padding:.8rem .7rem 1rem !important; }
+}
+
+@media (max-width: 640px) {
+  .block-container { padding:.65rem .58rem 4rem !important; }
+  .nj-app-title { font-size:1rem; }
+  .nj-section-title { font-size:1.16rem; }
+  .nj-card { border-radius:12px; margin:7px 0; }
+  .nj-muted { font-size:.65rem; }
+  .nj-tag { font-size:.62rem; padding:3px 6px; }
+  .stButton > button { min-height:36px !important; font-size:.82rem !important; }
+  [data-testid="stDataFrame"] { font-size:.75rem; }
 }
 </style>
 """
