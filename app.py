@@ -2266,7 +2266,171 @@ def page_journal(df: pd.DataFrame, store: NoteStore, aid: str) -> None:
 # MAIN
 # =========================================================
 
-NAV = ["📊 Dashboard", "📝 New Trade Setup", "📈 Trading Performance", "📊 Performance Breakdown", "🧠 Trading Behavior", "🧬 Trading DNA", "📐 Portfolio Exposure", "🛡️ Risk Engine", "🧠 Decision Engine", "🟡 ไม้ที่เปิดอยู่", "📓 Journal", "🔌 เชื่อมต่อบัญชี"]
+NAV = ["📊 Dashboard", "📝 New Trade Setup", "🛡️ Setup Compliance", "📈 Trading Performance", "📊 Performance Breakdown", "🧠 Trading Behavior", "🧬 Trading DNA", "📐 Portfolio Exposure", "🛡️ Risk Engine", "🧠 Decision Engine", "🟡 ไม้ที่เปิดอยู่", "📓 Journal", "🔌 เชื่อมต่อบัญชี"]
+
+
+# =========================================================
+# GOLD SETUP COMPLIANCE ENGINE v1
+# =========================================================
+
+def _compliance_direction(deal_type: str) -> str:
+    s = str(deal_type or '').upper()
+    if 'BUY' in s:
+        return 'LONG'
+    if 'SELL' in s:
+        return 'SHORT'
+    return ''
+
+
+def _entry_inside_fvg(price, fvg_high, fvg_low) -> bool | None:
+    try:
+        hi, lo, px = float(fvg_high), float(fvg_low), float(price)
+    except (TypeError, ValueError):
+        return None
+    if hi < lo:
+        hi, lo = lo, hi
+    return lo <= px <= hi
+
+
+def _evaluate_setup_plan(plan: dict, deal: dict) -> tuple[str, str]:
+    planned_dir = str(plan.get('direction') or '').upper()
+    actual_dir = _compliance_direction(deal.get('deal_type'))
+    actual_entry = _num(deal.get('price'), None)
+    if planned_dir and actual_dir and planned_dir != actual_dir:
+        return 'DEVIATION', f'Direction mismatch: plan={planned_dir}, actual={actual_dir}'
+    inside = _entry_inside_fvg(actual_entry, plan.get('fvg_high'), plan.get('fvg_low')) if actual_entry is not None else None
+    if inside is False:
+        return 'DEVIATION', 'Actual entry is outside the planned FVG zone'
+    if inside is True:
+        return 'COMPLIANT', 'Direction matches and actual entry is inside planned FVG'
+    return 'PENDING', 'Direction matches; FVG bounds are not available for automatic entry-zone verification'
+
+
+def _fetch_compliance_rows(snapshot: dict) -> list[dict]:
+    base_url, api_key = get_supabase_config()
+    if not base_url or not api_key:
+        return []
+    params = [('select', '*'), ('order', 'evaluated_at.desc.nullslast,created_at.desc'), ('limit', '100')]
+    if snapshot.get('login') not in (None, ''):
+        params.append(('login', f"eq.{snapshot.get('login')}"))
+    if snapshot.get('server') not in (None, ''):
+        params.append(('server', f"eq.{snapshot.get('server')}"))
+    try:
+        r = requests.get(f'{base_url}/rest/v1/trade_setup_compliance', headers=_supabase_headers(api_key), params=params, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        return data if isinstance(data, list) else []
+    except Exception as exc:
+        st.session_state['supabase_error_trade_setup_compliance'] = str(exc)
+        return []
+
+
+def _save_compliance(row: dict) -> tuple[bool, str]:
+    base_url, api_key = get_supabase_config()
+    if not base_url or not api_key:
+        return False, 'ยังไม่ได้ตั้งค่า Supabase'
+    try:
+        r = requests.post(f'{base_url}/rest/v1/trade_setup_compliance', headers=_supabase_headers(api_key, True), params={'on_conflict': 'setup_id,deal_ticket'}, json=row, timeout=10)
+        if r.status_code not in (200, 201, 204):
+            return False, f'Supabase HTTP={r.status_code}: {r.text[:500]}'
+        return True, 'บันทึก Compliance แล้ว'
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _match_locked_plans(snapshot: dict) -> tuple[int, int]:
+    plans = fetch_trade_setup_plans(snapshot)
+    locked = [p for p in plans if str(p.get('status') or '').upper() == 'LOCKED' and _gold_symbol_allowed(p.get('symbol')) and str(p.get('timeframe') or '').upper() == 'M5']
+    if not locked:
+        return 0, 0
+    history = fetch_mt5_history_supabase(snapshot)
+    if history.empty:
+        return len(locked), 0
+    existing = {(str(x.get('setup_id')), str(x.get('deal_ticket'))) for x in _fetch_compliance_rows(snapshot)}
+    rows = history.to_dict('records')
+    matched = 0
+    used_deals = set(existing)
+    for plan in locked:
+        setup_id = str(plan.get('setup_id') or '')
+        if not setup_id:
+            continue
+        lock_time = pd.to_datetime(plan.get('locked_at'), utc=True, errors='coerce')
+        candidates = []
+        for deal in rows:
+            if not _gold_symbol_allowed(deal.get('symbol')):
+                continue
+            if str(deal.get('entry_type') or '').upper() not in ('IN', 'ENTRY', 'INOUT'):
+                continue
+            deal_time = pd.to_datetime(deal.get('deal_time'), utc=True, errors='coerce')
+            if pd.isna(deal_time) or (pd.notna(lock_time) and deal_time < lock_time):
+                continue
+            candidates.append((deal_time, deal))
+        candidates.sort(key=lambda x: x[0])
+        if not candidates:
+            continue
+        deal = candidates[0][1]
+        deal_ticket = str(deal.get('deal_ticket') or '')
+        if (setup_id, deal_ticket) in used_deals or any(dt == deal_ticket for _, dt in used_deals):
+            continue
+        status, reason = _evaluate_setup_plan(plan, deal)
+        row = {
+            'setup_id': setup_id,
+            'login': plan.get('login') or snapshot.get('login'),
+            'server': plan.get('server') or snapshot.get('server'),
+            'deal_ticket': int(float(deal.get('deal_ticket'))) if str(deal.get('deal_ticket') or '').strip() else None,
+            'position_id': int(float(deal.get('position_id'))) if str(deal.get('position_id') or '').strip() else None,
+            'symbol': str(deal.get('symbol') or 'XAUUSD'),
+            'planned_direction': plan.get('direction'),
+            'actual_direction': _compliance_direction(deal.get('deal_type')),
+            'planned_entry': plan.get('entry_price'),
+            'actual_entry': deal.get('price'),
+            'planned_stop_loss': plan.get('stop_loss'),
+            'actual_stop_loss': None,
+            'planned_take_profit': plan.get('take_profit'),
+            'actual_take_profit': None,
+            'planned_rr': plan.get('planned_rr'),
+            'compliance_status': status,
+            'deviation_reason': reason,
+            'trade_profit': deal.get('profit'),
+            'trade_commission': deal.get('commission'),
+            'trade_swap': deal.get('swap'),
+            'trade_fee': deal.get('fee'),
+            'evaluated_at': pd.Timestamp.now(tz='UTC').isoformat(),
+        }
+        ok, _ = _save_compliance(row)
+        if ok:
+            matched += 1
+            used_deals.add((setup_id, deal_ticket))
+    return len(locked), matched
+
+
+def page_setup_compliance(snapshot: dict) -> None:
+    st.markdown('<div class="nj-section-title">🛡️ Setup Compliance</div>', unsafe_allow_html=True)
+    st.caption('Gold Technical Model v1 · Locked Plan ↔ MT5 Trade · ไม่ใช้ผลกำไร/ขาดทุนตัดสินว่าทำตามแผนหรือไม่')
+    if not snapshot or snapshot.get('_error'):
+        st.warning('ยังไม่พบ Account Snapshot จาก Supabase')
+        return
+    if st.button('↻ ตรวจสอบ Trade ใหม่', key='run_setup_compliance'):
+        with st.spinner('กำลังจับคู่ Locked Plan กับ MT5 Trade...'):
+            total, matched = _match_locked_plans(snapshot)
+        st.success(f'ตรวจสอบ Locked Plan {total} รายการ · สร้างผล Compliance ใหม่ {matched} รายการ')
+        st.rerun()
+    rows = _fetch_compliance_rows(snapshot)
+    if not rows:
+        st.info('ยังไม่มี Trade ที่จับคู่กับ Locked Trade Plan')
+        st.caption('ระบบจะจับคู่เฉพาะ GOLD/XAUUSD และเฉพาะ Entry deal ที่เกิดหลัง Plan ถูก LOCK')
+        return
+    df = pd.DataFrame(rows)
+    counts = df['compliance_status'].value_counts() if 'compliance_status' in df.columns else pd.Series(dtype=int)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric('Matched Trades', len(df))
+    c2.metric('🟢 Compliant', int(counts.get('COMPLIANT', 0)))
+    c3.metric('🟡 Deviation', int(counts.get('DEVIATION', 0)))
+    c4.metric('⚪ Pending', int(counts.get('PENDING', 0)))
+    preferred = ['setup_id','deal_ticket','symbol','planned_direction','actual_direction','planned_entry','actual_entry','planned_rr','compliance_status','trade_profit','deviation_reason','evaluated_at']
+    cols = [c for c in preferred if c in df.columns]
+    st.dataframe(df[cols], use_container_width=True, hide_index=True)
+    st.info('หมายเหตุ: X/IDM, BOS และโครงสร้าง FVG เป็นข้อมูลที่มาจาก Trade Plan ที่มึงบันทึกเอง ระบบ MT5 History ยังพิสูจน์โครงสร้างบนกราฟย้อนหลังไม่ได้ จึงยังไม่แกล้งสรุปส่วนนี้อัตโนมัติ')
 
 
 def main() -> None:
@@ -2308,6 +2472,9 @@ def main() -> None:
             return
         if page == "📝 New Trade Setup":
             page_new_trade_setup(fetch_latest_mt5_snapshot())
+            return
+        if page == "🛡️ Setup Compliance":
+            page_setup_compliance(fetch_latest_mt5_snapshot())
             return
         if page == "📈 Trading Performance":
             page_performance_baseline(fetch_latest_mt5_snapshot())
