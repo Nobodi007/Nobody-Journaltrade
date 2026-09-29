@@ -1899,22 +1899,31 @@ def main() -> None:
             page_performance_breakdown(fetch_latest_mt5_snapshot())
             return
         if page == NAV[3]:
-            page_exposure(fetch_latest_mt5_snapshot())
+            page_behavior_analysis(fetch_latest_mt5_snapshot())
             return
         if page == NAV[4]:
-            page_risk_engine(fetch_latest_mt5_snapshot())
+            page_exposure(fetch_latest_mt5_snapshot())
             return
         if page == NAV[5]:
-            page_decision_engine(fetch_latest_mt5_snapshot())
+            page_risk_engine(fetch_latest_mt5_snapshot())
             return
         if page == NAV[6]:
+            page_decision_engine(fetch_latest_mt5_snapshot())
+            return
+        if page == NAV[7]:
             page_live_monitor(fetch_latest_mt5_snapshot())
             return
-        if page == NAV[8]:
+        if page == NAV[9]:
             st.subheader("🔌 MT5 Collector")
             st.success("Supabase เชื่อมต่อแล้ว — NobodyCollector กำลังส่งข้อมูลจาก MT5", icon="✅")
             st.code("MT5 → NobodyCollector → Supabase → Nobody Trade Journal", language="text")
             st.caption("Account / Positions / Pending / Trade History พร้อมอ่านจาก Supabase")
+            return
+        if page == NAV[8]:
+            st.info(
+                "Journal เดิมยังใช้ระบบโน้ตเดิมอยู่ · การเชื่อม Trade History จาก Supabase เข้ากับ Journal จะทำในขั้นถัดไป",
+                icon="ℹ️",
+            )
             return
         st.info(
             "หน้า Journal เดิมยังคงใช้ระบบโน้ตเดิมอยู่ รอบถัดไปค่อยเชื่อม Trade History จาก Supabase เข้ากับ Journal",
