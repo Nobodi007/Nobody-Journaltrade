@@ -2016,10 +2016,29 @@ new ResizeObserver(resize).observe($('chart'));
 function fmtStatus(t,ok=true){status.textContent=t;status.className=ok?'ok':'bad'}
 function calcEMA(rows,n=200){let out=[],k=2/(n+1),prev=null;for(const r of rows){prev=prev==null?r.close:r.close*k+prev*(1-k);out.push({time:r.time,value:prev})}return out}
 async function loadCandles(){
- try{const q=`${CFG.supabaseUrl}/rest/v1/mt5_gold_m5_candles?select=time_unix,open,high,low,close,volume&login=eq.${encodeURIComponent(CFG.login)}&server=eq.${encodeURIComponent(CFG.server)}&symbol=eq.XAUUSD&order=time.asc&limit=1200`;
- const r=await fetch(q,{headers:{apikey:CFG.supabaseKey,Authorization:`Bearer ${CFG.supabaseKey}`}}); if(!r.ok) throw new Error(`HTTP ${r.status}`); const rows=await r.json();
- const data=rows.map(x=>({time:Number(x.time_unix),open:+x.open,high:+x.high,low:+x.low,close:+x.close,volume:+(x.volume||0)})).filter(x=>Number.isFinite(x.time)&&Number.isFinite(x.close));
- candles.setData(data.map(({time,open,high,low,close})=>({time,open,high,low,close}))); volume.setData(data.map(x=>({time:x.time,value:x.volume,color:x.close>=x.open?'rgba(32,214,138,.28)':'rgba(255,97,116,.28)'}))); ema.setData(calcEMA(data)); $('empty').style.display=data.length?'none':'flex'; chart.timeScale().fitContent(); fmtStatus(data.length?`M5 candles: ${data.length.toLocaleString()} · EMA200 · Volume`:'ยังไม่มี candle data — ให้ NobodyCollector เก็บ M5 ก่อน',!!data.length);
+ try{
+  const headers={apikey:CFG.supabaseKey,Authorization:`Bearer ${CFG.supabaseKey}`};
+  const base=`${CFG.supabaseUrl}/rest/v1/mt5_gold_m5_candles?select=time_unix,open,high,low,close,volume&symbol=eq.XAUUSD&timeframe=eq.M5&order=time.asc&limit=1200`;
+  let mode='account';
+  let q=`${base}&login=eq.${encodeURIComponent(CFG.login)}&server=eq.${encodeURIComponent(CFG.server)}`;
+  let r=await fetch(q,{headers});
+  if(!r.ok) throw new Error(`HTTP ${r.status}`);
+  let rows=await r.json();
+  // Fallback: if the collector wrote valid XAUUSD/M5 rows but the account/server
+  // metadata differs, still render the candle feed instead of leaving the chart blank.
+  if(!Array.isArray(rows)||rows.length===0){
+    mode='symbol';
+    r=await fetch(base,{headers});
+    if(!r.ok) throw new Error(`HTTP ${r.status}`);
+    rows=await r.json();
+  }
+  const data=rows.map(x=>({time:Number(x.time_unix),open:+x.open,high:+x.high,low:+x.low,close:+x.close,volume:+(x.volume||0)})).filter(x=>Number.isFinite(x.time)&&Number.isFinite(x.close));
+  candles.setData(data.map(({time,open,high,low,close})=>({time,open,high,low,close})));
+  volume.setData(data.map(x=>({time:x.time,value:x.volume,color:x.close>=x.open?'rgba(32,214,138,.28)':'rgba(255,97,116,.28)'})));
+  ema.setData(calcEMA(data));
+  $('empty').style.display=data.length?'none':'flex';
+  chart.timeScale().fitContent();
+  fmtStatus(data.length?`M5 candles: ${data.length.toLocaleString()} · EMA200 · Volume${mode==='symbol'?' · fallback feed':''}`:'ยังไม่มี XAUUSD M5 candle ใน Supabase',!!data.length);
  }catch(e){$('empty').style.display='flex';fmtStatus(`โหลด candle ไม่สำเร็จ: ${e.message}`,false)} }
 function p2xy(p){if(!p)return null;const x=chart.timeScale().timeToCoordinate(p.time);const y=chart.priceScale('right').priceToCoordinate(p.price);return x==null||y==null?null:{x,y}}
 function xy2p(x,y){const t=chart.timeScale().coordinateToTime(x);const pr=chart.priceScale('right').coordinateToPrice(y);return t==null||pr==null?null:{time:Number(t),price:Number(pr)} }
