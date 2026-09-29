@@ -1992,7 +1992,7 @@ def render_gold_tradingview_chart() -> None:
 
     # Official TradingView Advanced Chart widget settings.
     chart_html = r'''
-    <div id="tv-gold-workspace" style="width:100%;height:900px;background:#0b0d10;border:1px solid #242a33;border-radius:14px;overflow:hidden;">
+    <div id="tv-gold-workspace" style="width:100%;height:560px;background:#0b0d10;border:1px solid #242a33;border-radius:14px;overflow:hidden;">
       <div class="tradingview-widget-container" style="width:100%;height:100%;">
         <div class="tradingview-widget-container__widget" style="width:100%;height:100%;"></div>
         <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js?v=gold-workspace-v3" async>
@@ -2027,7 +2027,7 @@ def render_gold_tradingview_chart() -> None:
     </div>
     '''
 
-    components.html(chart_html, height=920, scrolling=False)
+    components.html(chart_html, height=580, scrolling=False)
 
     st.markdown(
         """
