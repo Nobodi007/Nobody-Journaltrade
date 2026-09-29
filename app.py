@@ -215,36 +215,71 @@ def _num(v, default=0.0):
 
 
 def render_supabase_positions(df: pd.DataFrame) -> None:
+    """Live open-position monitor from MT5 -> Supabase."""
     st.markdown("### 🟢 Open Positions")
     if df.empty:
         st.info("ไม่มีไม้เปิดอยู่ตอนนี้")
+        st.caption("เมื่อมี Position ใน MT5 รายการจะปรากฏที่นี่อัตโนมัติ")
         return
 
-    profit_col = "profit" if "profit" in df.columns else None
-    volume_col = "volume" if "volume" in df.columns else None
-    total_profit = df[profit_col].map(_num).sum() if profit_col else 0.0
-    total_volume = df[volume_col].map(_num).sum() if volume_col else 0.0
+    work = df.copy()
+    for col in ("volume", "open_price", "current_price", "stop_loss", "take_profit", "profit", "swap", "commission"):
+        if col in work.columns:
+            work[col] = pd.to_numeric(work[col], errors="coerce").fillna(0.0)
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("จำนวนไม้", len(df))
-    c2.metric("Lots รวม", f"{total_volume:,.2f}")
-    c3.metric("กำไรลอยตัว", f"{total_profit:+,.2f}")
+    side = work.get("side", pd.Series(index=work.index, dtype="object")).astype(str).str.upper()
+    buy_mask = side.str.contains("BUY", na=False)
+    sell_mask = side.str.contains("SELL", na=False)
+    total_profit = float(work.get("profit", pd.Series(dtype=float)).sum())
+    total_volume = float(work.get("volume", pd.Series(dtype=float)).sum())
+    buy_volume = float(work.loc[buy_mask, "volume"].sum()) if "volume" in work.columns else 0.0
+    sell_volume = float(work.loc[sell_mask, "volume"].sum()) if "volume" in work.columns else 0.0
+    total_swap = float(work.get("swap", pd.Series(dtype=float)).sum())
+    total_commission = float(work.get("commission", pd.Series(dtype=float)).sum())
 
-    preferred = [
-        "ticket", "symbol", "side", "volume", "open_price",
-        "current_price", "stop_loss", "take_profit", "profit",
-        "swap", "commission", "open_time", "last_seen_at", "comment",
-    ]
-    cols = [c for c in preferred if c in df.columns]
-    view = df[cols].copy()
-    rename = {
-        "ticket":"Ticket", "symbol":"Symbol", "side":"Side", "volume":"Lots",
-        "open_price":"Open", "current_price":"Current", "stop_loss":"SL",
-        "take_profit":"TP", "profit":"Profit", "swap":"Swap",
-        "commission":"Commission", "open_time":"Open Time",
-        "last_seen_at":"Last Seen", "comment":"Comment",
-    }
-    st.dataframe(view.rename(columns=rename), use_container_width=True, hide_index=True)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Open Positions", f"{len(work)}")
+    c2.metric("Floating P&L", f"{total_profit:+,.2f}")
+    c3.metric("Exposure (Lots)", f"{total_volume:,.2f}")
+    c4.metric("BUY / SELL", f"{buy_volume:.2f} / {sell_volume:.2f}")
+
+    c5, c6, c7 = st.columns(3)
+    c5.metric("Swap", f"{total_swap:+,.2f}")
+    c6.metric("Commission", f"{total_commission:+,.2f}")
+    c7.metric("Net Floating", f"{total_profit + total_swap + total_commission:+,.2f}")
+
+    st.markdown("#### Live Position Monitor")
+    for _, row in work.iterrows():
+        symbol = str(row.get("symbol") or "-")
+        row_side = str(row.get("side") or "-").upper()
+        lots = _num(row.get("volume"))
+        open_px = _num(row.get("open_price"))
+        current_px = _num(row.get("current_price"))
+        sl = _num(row.get("stop_loss"), 0.0)
+        tp = _num(row.get("take_profit"), 0.0)
+        profit = _num(row.get("profit"))
+        swap = _num(row.get("swap"))
+        commission = _num(row.get("commission"))
+        ticket = str(row.get("ticket") or "-")
+        comment = str(row.get("comment") or "").strip()
+        pnl_class = "#0ecb81" if profit >= 0 else "#f6465d"
+        side_icon = "🟢" if "BUY" in row_side else ("🔴" if "SELL" in row_side else "⚪")
+        sl_text = f"{sl:,.5f}" if sl else "—"
+        tp_text = f"{tp:,.5f}" if tp else "—"
+        comment_html = f" · {comment}" if comment else ""
+        card = f"""<div style="border:1px solid #2b3139;border-radius:12px;padding:13px 15px;margin:0 0 9px 0;background:#15181e;">
+<div style="display:flex;justify-content:space-between;gap:12px;align-items:center;"><div style="font-weight:750;font-size:16px;">{side_icon} {symbol} <span style="opacity:.72;font-size:13px;">{row_side} · {lots:.2f} lot</span></div><div style="font-weight:800;color:{pnl_class};font-size:16px;">{profit:+,.2f}</div></div>
+<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:10px;font-size:12px;"><div><span style="opacity:.55;">Entry</span><br><b>{open_px:,.5f}</b></div><div><span style="opacity:.55;">Current</span><br><b>{current_px:,.5f}</b></div><div><span style="opacity:.55;">SL</span><br><b>{sl_text}</b></div><div><span style="opacity:.55;">TP</span><br><b>{tp_text}</b></div></div>
+<div style="margin-top:8px;opacity:.58;font-size:11px;">Ticket {ticket} · Swap {swap:+,.2f} · Commission {commission:+,.2f}{comment_html}</div>
+</div>"""
+        st.markdown(card, unsafe_allow_html=True)
+
+    with st.expander("รายละเอียด Position ทั้งหมด", expanded=False):
+        preferred = ["ticket", "symbol", "side", "volume", "open_price", "current_price", "stop_loss", "take_profit", "profit", "swap", "commission", "open_time", "last_seen_at", "comment"]
+        cols = [c for c in preferred if c in work.columns]
+        view = work[cols].copy()
+        rename = {"ticket":"Ticket", "symbol":"Symbol", "side":"Side", "volume":"Lots", "open_price":"Open", "current_price":"Current", "stop_loss":"SL", "take_profit":"TP", "profit":"Profit", "swap":"Swap", "commission":"Commission", "open_time":"Open Time", "last_seen_at":"Last Seen", "comment":"Comment"}
+        st.dataframe(view.rename(columns=rename), use_container_width=True, hide_index=True)
 
 
 def render_supabase_pending(df: pd.DataFrame) -> None:
@@ -787,8 +822,16 @@ def main() -> None:
             page_supabase_dashboard(fetch_latest_mt5_snapshot())
             return
         if page == NAV[1]:
+            st.markdown('<div class="nj-section-title">Live Trading Monitor</div>', unsafe_allow_html=True)
+            st.caption("Open Positions จาก MT5 → NobodyCollector → Supabase")
+            top1, top2 = st.columns([1, 5])
+            with top1:
+                if st.button("↻ รีเฟรช", use_container_width=True, key="supabase_positions_refresh"):
+                    clear_cache()
+                    st.rerun()
             snap = fetch_latest_mt5_snapshot()
             if snap and not snap.get("_error"):
+                st.caption(f"บัญชี {snap.get('login','-')} · {snap.get('server','-')} · snapshot ล่าสุด {snap.get('collected_at','-')}")
                 render_supabase_positions(fetch_mt5_positions_supabase(snap))
             else:
                 render_mt5_snapshot(snap)
