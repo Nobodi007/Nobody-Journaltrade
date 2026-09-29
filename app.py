@@ -1919,6 +1919,26 @@ def _setup_patch_locked(setup_id: str) -> tuple[bool, str]:
         return False, str(exc)
 
 
+def _setup_delete(setup_id: str) -> tuple[bool, str]:
+    """Soft-delete a PLANNED setup. LOCKED setups are intentionally protected."""
+    base_url, api_key = get_supabase_config()
+    if not base_url or not api_key:
+        return False, "ยังไม่ได้ตั้งค่า Supabase"
+    try:
+        r = requests.patch(
+            f"{base_url}/rest/v1/trade_setup_plans",
+            params={"setup_id": f"eq.{setup_id}", "status": "eq.PLANNED"},
+            headers=_supabase_headers(api_key, True),
+            json={"status": "DELETED"},
+            timeout=10,
+        )
+        if r.status_code not in (200, 204):
+            return False, f"Supabase HTTP={r.status_code}: {r.text[:500]}"
+        return True, "ลบแผนแล้ว"
+    except Exception as exc:
+        return False, str(exc)
+
+
 @st.cache_data(ttl=5, show_spinner=False)
 def fetch_trade_setup_plans(snapshot: dict) -> list[dict]:
     base_url, api_key = get_supabase_config()
@@ -1992,7 +2012,7 @@ def render_gold_tradingview_chart() -> None:
 
     # Official TradingView Advanced Chart widget settings.
     chart_html = r'''
-    <div id="tv-gold-workspace" style="width:100%;height:900px;background:#0b0d10;border:1px solid #242a33;border-radius:14px;overflow:hidden;">
+    <div id="tv-gold-workspace" style="width:100%;height:500px;background:#0b0d10;border:1px solid #242a33;border-radius:14px;overflow:hidden;">
       <div class="tradingview-widget-container" style="width:100%;height:100%;">
         <div class="tradingview-widget-container__widget" style="width:100%;height:100%;"></div>
         <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js?v=gold-workspace-v3" async>
@@ -2027,7 +2047,7 @@ def render_gold_tradingview_chart() -> None:
     </div>
     '''
 
-    components.html(chart_html, height=920, scrolling=False)
+    components.html(chart_html, height=520, scrolling=False)
 
     st.markdown(
         """
@@ -2087,23 +2107,38 @@ def page_new_trade_setup(snapshot: dict) -> None:
         st.info("ยังไม่มี Open GOLD/XAUUSD position ใน mt5_positions จึงยังไม่มี current price จาก MT5 ให้ดึงมาใส่ Entry — กราฟ TradingView ใช้วิเคราะห์ได้ตามปกติ")
 
     plans = fetch_trade_setup_plans(snapshot)
-    if plans:
+    # DELETED plans remain in Supabase for audit/history but are hidden from the active list.
+    active_plans = [p for p in plans if str(p.get("status", "")).upper() != "DELETED"]
+    if active_plans:
         st.markdown("### แผนที่บันทึกไว้")
-        view = pd.DataFrame(plans)
+        view = pd.DataFrame(active_plans)
         cols = [c for c in ["setup_id", "symbol", "direction", "timeframe", "trend_state", "planned_rr", "status", "created_at", "locked_at"] if c in view.columns]
         st.dataframe(view[cols], use_container_width=True, hide_index=True)
-        for p in plans[:10]:
+        for p in active_plans[:10]:
             sid = str(p.get("setup_id", ""))
-            status = str(p.get("status", ""))
+            status = str(p.get("status", "")).upper()
             if status == "PLANNED" and sid:
-                if st.button(f"🔒 Lock {sid}", key=f"lock_setup_{sid}", use_container_width=False):
-                    ok, msg = _setup_patch_locked(sid)
-                    if ok:
-                        st.success(msg)
-                        fetch_trade_setup_plans.clear()
-                        st.rerun()
-                    else:
-                        st.error(msg)
+                c_lock, c_delete = st.columns(2)
+                with c_lock:
+                    if st.button(f"🔒 Lock {sid}", key=f"lock_setup_{sid}", use_container_width=True):
+                        ok, msg = _setup_patch_locked(sid)
+                        if ok:
+                            st.success(msg)
+                            fetch_trade_setup_plans.clear()
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                with c_delete:
+                    if st.button(f"🗑️ ลบ {sid}", key=f"delete_setup_{sid}", use_container_width=True):
+                        ok, msg = _setup_delete(sid)
+                        if ok:
+                            st.success(msg)
+                            fetch_trade_setup_plans.clear()
+                            st.rerun()
+                        else:
+                            st.error(msg)
+            elif status == "LOCKED":
+                st.caption(f"🔒 {sid} — LOCKED แล้ว จึงไม่สามารถลบได้")
     else:
         st.info("ยังไม่มี Trade Setup ที่บันทึกไว้")
 
