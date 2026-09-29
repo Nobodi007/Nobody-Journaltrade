@@ -138,6 +138,161 @@ def fetch_latest_mt5_snapshot() -> dict:
         return {"_error": str(exc)}
 
 
+
+@st.cache_data(ttl=5, show_spinner=False)
+def fetch_supabase_rows(table: str, params: tuple[tuple[str, str], ...] = ()) -> list[dict]:
+    """อ่านตาราง MT5 จาก Supabase Data API โดยใช้ publishable/anon key."""
+    base_url, api_key = get_supabase_config()
+    if not base_url or not api_key:
+        return []
+
+    query = [("select", "*")] + list(params)
+    headers = {
+        "apikey": api_key,
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+    }
+    try:
+        r = requests.get(
+            f"{base_url}/rest/v1/{table}",
+            headers=headers,
+            params=query,
+            timeout=10,
+        )
+        r.raise_for_status()
+        data = r.json()
+        return data if isinstance(data, list) else []
+    except Exception as exc:
+        st.session_state[f"supabase_error_{table}"] = str(exc)
+        return []
+
+
+def _account_filter(snapshot: dict) -> tuple[tuple[str, str], ...]:
+    login = snapshot.get("login")
+    server = snapshot.get("server")
+    filters: list[tuple[str, str]] = []
+    if login not in (None, ""):
+        filters.append(("login", f"eq.{login}"))
+    if server not in (None, ""):
+        filters.append(("server", f"eq.{server}"))
+    return tuple(filters)
+
+
+@st.cache_data(ttl=5, show_spinner=False)
+def fetch_mt5_positions_supabase(snapshot: dict) -> pd.DataFrame:
+    rows = fetch_supabase_rows(
+        "mt5_positions",
+        _account_filter(snapshot) + (("order", "last_seen_at.desc"),),
+    )
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=5, show_spinner=False)
+def fetch_mt5_pending_supabase(snapshot: dict) -> pd.DataFrame:
+    rows = fetch_supabase_rows(
+        "mt5_pending_orders",
+        _account_filter(snapshot) + (("order", "last_seen_at.desc"),),
+    )
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def fetch_mt5_history_supabase(snapshot: dict) -> pd.DataFrame:
+    rows = fetch_supabase_rows(
+        "mt5_trade_history",
+        _account_filter(snapshot) + (("order", "deal_time.desc"), ("limit", "100")),
+    )
+    return pd.DataFrame(rows)
+
+
+def _num(v, default=0.0):
+    try:
+        if v is None or v == "":
+            return default
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def render_supabase_positions(df: pd.DataFrame) -> None:
+    st.markdown("### 🟢 Open Positions")
+    if df.empty:
+        st.info("ไม่มีไม้เปิดอยู่ตอนนี้")
+        return
+
+    profit_col = "profit" if "profit" in df.columns else None
+    volume_col = "volume" if "volume" in df.columns else None
+    total_profit = df[profit_col].map(_num).sum() if profit_col else 0.0
+    total_volume = df[volume_col].map(_num).sum() if volume_col else 0.0
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("จำนวนไม้", len(df))
+    c2.metric("Lots รวม", f"{total_volume:,.2f}")
+    c3.metric("กำไรลอยตัว", f"{total_profit:+,.2f}")
+
+    preferred = [
+        "ticket", "symbol", "side", "volume", "open_price",
+        "current_price", "stop_loss", "take_profit", "profit",
+        "swap", "commission", "open_time", "last_seen_at", "comment",
+    ]
+    cols = [c for c in preferred if c in df.columns]
+    view = df[cols].copy()
+    rename = {
+        "ticket":"Ticket", "symbol":"Symbol", "side":"Side", "volume":"Lots",
+        "open_price":"Open", "current_price":"Current", "stop_loss":"SL",
+        "take_profit":"TP", "profit":"Profit", "swap":"Swap",
+        "commission":"Commission", "open_time":"Open Time",
+        "last_seen_at":"Last Seen", "comment":"Comment",
+    }
+    st.dataframe(view.rename(columns=rename), use_container_width=True, hide_index=True)
+
+
+def render_supabase_pending(df: pd.DataFrame) -> None:
+    st.markdown("### 🟡 Pending Orders")
+    if df.empty:
+        st.success("ไม่มี Pending Orders", icon="✅")
+        return
+
+    preferred = [
+        "ticket", "symbol", "order_type", "volume_initial", "volume_current",
+        "price_open", "price_current", "stop_loss", "take_profit",
+        "state", "time_setup", "last_seen_at", "comment",
+    ]
+    cols = [c for c in preferred if c in df.columns]
+    view = df[cols].copy()
+    rename = {
+        "ticket":"Ticket", "symbol":"Symbol", "order_type":"Type",
+        "volume_initial":"Lots Initial", "volume_current":"Lots Current",
+        "price_open":"Price", "price_current":"Current", "stop_loss":"SL",
+        "take_profit":"TP", "state":"State", "time_setup":"Setup Time",
+        "last_seen_at":"Last Seen", "comment":"Comment",
+    }
+    st.dataframe(view.rename(columns=rename), use_container_width=True, hide_index=True)
+
+
+def render_supabase_history(df: pd.DataFrame) -> None:
+    st.markdown("### 📜 Recent Trade History")
+    if df.empty:
+        st.info("ยังไม่มี Trade / Deal History ใน Supabase")
+        return
+
+    preferred = [
+        "deal_time", "deal_ticket", "order_ticket", "position_id", "symbol",
+        "deal_type", "entry_type", "volume", "price", "profit",
+        "commission", "swap", "fee", "comment", "reason",
+    ]
+    cols = [c for c in preferred if c in df.columns]
+    view = df[cols].copy()
+    rename = {
+        "deal_time":"Time", "deal_ticket":"Deal", "order_ticket":"Order",
+        "position_id":"Position", "symbol":"Symbol", "deal_type":"Type",
+        "entry_type":"Entry", "volume":"Lots", "price":"Price",
+        "profit":"Profit", "commission":"Commission", "swap":"Swap",
+        "fee":"Fee", "comment":"Comment", "reason":"Reason",
+    }
+    st.dataframe(view.rename(columns=rename), use_container_width=True, hide_index=True)
+
+
 def render_mt5_snapshot(snapshot: dict) -> None:
     """แสดงสถานะ MT5 จาก snapshot โดยไม่แตะ MetaApi."""
     if not snapshot:
@@ -208,6 +363,9 @@ def clear_cache() -> None:
     for fn in (
         fetch_accounts, fetch_metrics, fetch_history,
         fetch_positions, fetch_account_info,
+        fetch_latest_mt5_snapshot, fetch_supabase_rows,
+        fetch_mt5_positions_supabase, fetch_mt5_pending_supabase,
+        fetch_mt5_history_supabase,
     ):
         fn.clear()
 
@@ -337,23 +495,46 @@ def page_connect(token: str, region: str) -> None:
 
 
 def page_supabase_dashboard(snapshot: dict) -> None:
-    """Dashboard ขั้นแรกของ free MT5 pipeline: MT5 -> EA -> Supabase."""
+    """Free MT5 dashboard: MT5 -> NobodyCollector -> Supabase -> Streamlit."""
     st.markdown('<div class="nj-section-title">Portfolio Overview</div>', unsafe_allow_html=True)
-    st.caption("ข้อมูลบัญชี MT5 จาก NobodyCollector → Supabase")
+    st.caption("ข้อมูล MT5 จาก NobodyCollector → Supabase")
+
+    if not snapshot:
+        st.warning("ยังไม่พบ Account Snapshot จาก Supabase")
+        return
+    if snapshot.get("_error"):
+        st.error(f"อ่าน MT5 จาก Supabase ไม่สำเร็จ: {snapshot['_error']}")
+        return
+
     render_mt5_snapshot(snapshot)
 
+    pos = fetch_mt5_positions_supabase(snapshot)
+    pending = fetch_mt5_pending_supabase(snapshot)
+    history = fetch_mt5_history_supabase(snapshot)
+
     st.divider()
-    st.markdown("### 🔄 Data Pipeline")
+    render_supabase_positions(pos)
+
+    st.divider()
+    render_supabase_pending(pending)
+
+    st.divider()
+    render_supabase_history(history)
+
+    errors = []
+    for table in ("mt5_positions", "mt5_pending_orders", "mt5_trade_history"):
+        err = st.session_state.get(f"supabase_error_{table}")
+        if err:
+            errors.append(f"{table}: {err}")
+    if errors:
+        st.warning("Supabase Data API บางตารางอ่านไม่ได้: " + " | ".join(errors))
+
+    st.divider()
     st.success(
-        "MT5 → NobodyCollector → Supabase → Nobody Trade Journal ทำงานแล้ว "
-        "ข้อมูลบัญชีจะอัปเดตตามรอบ Collector",
+        "MT5 → NobodyCollector → Supabase → Nobody Trade Journal ทำงานแล้ว",
         icon="✅",
     )
-    st.info(
-        "ขั้นนี้แสดง Account Snapshot ก่อน ส่วน Open Positions และ Trade History "
-        "จะต่อจาก Collector ในขั้นถัดไป โดยไม่พึ่ง MetaApi",
-        icon="ℹ️",
-    )
+    st.caption("Account / Positions / Pending / Trade History อ่านจาก Supabase โดยตรง — ไม่ใช้ MetaApi")
 
 
 def page_dashboard(df: pd.DataFrame, metrics: dict, info: dict) -> None:
@@ -605,15 +786,21 @@ def main() -> None:
         if page == NAV[0]:
             page_supabase_dashboard(fetch_latest_mt5_snapshot())
             return
+        if page == NAV[1]:
+            snap = fetch_latest_mt5_snapshot()
+            if snap and not snap.get("_error"):
+                render_supabase_positions(fetch_mt5_positions_supabase(snap))
+            else:
+                render_mt5_snapshot(snap)
+            return
         if page == NAV[3]:
             st.subheader("🔌 MT5 Collector")
             st.success("Supabase เชื่อมต่อแล้ว — NobodyCollector กำลังส่งข้อมูลจาก MT5", icon="✅")
             st.code("MT5 → NobodyCollector → Supabase → Nobody Trade Journal", language="text")
-            st.caption("ยังไม่ต้องใช้ MetaApi สำหรับ Account Snapshot")
+            st.caption("Account / Positions / Pending / Trade History พร้อมอ่านจาก Supabase")
             return
         st.info(
-            "หน้านี้ต้องรอ Collector เก็บ Positions / Trade History เพิ่มก่อน "
-            "ตอนนี้ Account Snapshot พร้อมใช้งานแล้ว",
+            "หน้า Journal เดิมยังคงใช้ระบบโน้ตเดิมอยู่ รอบถัดไปค่อยเชื่อม Trade History จาก Supabase เข้ากับ Journal",
             icon="ℹ️",
         )
         return
