@@ -1292,6 +1292,98 @@ def _trade_baseline_rows(history: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _gold_position_trade_rows(history: pd.DataFrame) -> pd.DataFrame:
+    """Build true Gold trade rows at position level.
+
+    A completed trade is one MT5 position lifecycle, not one OUT deal.
+    Direction comes from the IN/open leg; multiple OUT/partial-close deals
+    for the same position_id are aggregated into one trade.
+    """
+    if history is None or history.empty:
+        return pd.DataFrame()
+
+    w = history.copy()
+    for c in ("profit", "commission", "swap", "fee", "volume", "price"):
+        if c in w.columns:
+            w[c] = pd.to_numeric(w[c], errors="coerce").fillna(0.0)
+    if "deal_time" in w.columns:
+        w["deal_time"] = pd.to_datetime(w["deal_time"], errors="coerce", utc=True)
+
+    if "entry_type" in w.columns:
+        et = w["entry_type"].astype(str).str.upper()
+        ins = w[et.isin(["IN", "INOUT", "OPEN"])].copy()
+        outs = w[et.isin(["OUT", "OUT_BY", "CLOSE", "CLOSED"])].copy()
+    else:
+        ins = pd.DataFrame()
+        outs = w.copy()
+
+    if outs.empty:
+        return pd.DataFrame()
+
+    # Use position_id as the lifecycle key. If unavailable, use deal_ticket
+    # so a row is still represented without pretending unrelated deals match.
+    key_col = "position_id" if "position_id" in outs.columns else "deal_ticket"
+    if key_col not in outs.columns:
+        outs["_trade_key"] = outs.index.astype(str)
+        key_col = "_trade_key"
+
+    direction_map = {}
+    entry_price_map = {}
+    entry_volume_map = {}
+    if not ins.empty:
+        ikey_col = "position_id" if "position_id" in ins.columns else "deal_ticket"
+        for key, g in ins.groupby(ikey_col, dropna=False, observed=False):
+            if pd.isna(key):
+                continue
+            dirs = g.get("deal_type", pd.Series(dtype=object)).astype(str).str.upper()
+            valid_dirs = dirs[dirs.isin(["BUY", "SELL"])]
+            if not valid_dirs.empty:
+                direction_map[str(key)] = valid_dirs.iloc[0]
+            vols = pd.to_numeric(g.get("volume", pd.Series(index=g.index, dtype=float)), errors="coerce").fillna(0.0)
+            prices = pd.to_numeric(g.get("price", pd.Series(index=g.index, dtype=float)), errors="coerce").fillna(0.0)
+            vtot = float(vols.sum())
+            if vtot > 0:
+                entry_price_map[str(key)] = float((prices * vols).sum() / vtot)
+                entry_volume_map[str(key)] = vtot
+
+    rows = []
+    for key, g in outs.groupby(key_col, dropna=False, observed=False):
+        if pd.isna(key):
+            continue
+        skey = str(key)
+        vols = pd.to_numeric(g.get("volume", pd.Series(index=g.index, dtype=float)), errors="coerce").fillna(0.0)
+        prices = pd.to_numeric(g.get("price", pd.Series(index=g.index, dtype=float)), errors="coerce").fillna(0.0)
+        vtot = float(vols.sum())
+        exit_price = float((prices * vols).sum() / vtot) if vtot > 0 else float(prices.iloc[-1]) if len(prices) else 0.0
+        net_result = sum(_num(g.iloc[i].get("profit")) + _num(g.iloc[i].get("commission")) + _num(g.iloc[i].get("swap")) + _num(g.iloc[i].get("fee")) for i in range(len(g)))
+        direction = direction_map.get(skey)
+        if direction not in ("BUY", "SELL"):
+            # Only a fallback when the source has no IN leg. This is explicitly
+            # marked as fallback rather than treating an OUT direction as entry direction.
+            direction = "BUY" if str(g.iloc[0].get("deal_type", "")).upper() == "SELL" else "SELL" if str(g.iloc[0].get("deal_type", "")).upper() == "BUY" else "UNKNOWN"
+        deal_time = g["deal_time"].max() if "deal_time" in g.columns else pd.NaT
+        first = g.iloc[0]
+        rows.append({
+            "position_id": key,
+            "order_ticket": first.get("order_ticket"),
+            "deal_ticket": first.get("deal_ticket"),
+            "symbol": first.get("symbol"),
+            "trade_direction": direction,
+            "entry_price": entry_price_map.get(skey),
+            "exit_price": exit_price,
+            "volume": vtot,
+            "net_result": float(net_result),
+            "deal_time": deal_time,
+            "exit_deals": int(len(g)),
+        })
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    out["deal_time"] = pd.to_datetime(out["deal_time"], errors="coerce", utc=True)
+    return out.sort_values("deal_time", ascending=False, kind="stable").reset_index(drop=True)
+
+
 def _streaks(results: list[float]) -> tuple[int, int]:
     best_w = best_l = cur_w = cur_l = 0
     for x in results:
@@ -2292,7 +2384,7 @@ def page_gold_journal(snapshot: dict) -> None:
         st.info("ยังไม่มี Trade History ของ GOLD/XAUUSD")
         return
 
-    trades = _trade_baseline_rows(gold_history)
+    trades = _gold_position_trade_rows(gold_history)
     if trades.empty:
         st.info("ยังไม่มี Closed GOLD/XAUUSD Trade ที่ใช้คำนวณ Performance")
         return
@@ -2322,7 +2414,7 @@ def page_gold_journal(snapshot: dict) -> None:
     c4.metric("W / L Streak", f"{ws} / {ls}")
 
     st.markdown("### 📊 ผลตาม Direction")
-    direction_df = _performance_breakdown_rows(gold_history)
+    direction_df = trades.copy()
     if not direction_df.empty and "trade_direction" in direction_df.columns:
         by_direction = _breakdown_table(direction_df, "trade_direction", "Direction")
         if not by_direction.empty:
@@ -2361,14 +2453,14 @@ def page_gold_journal(snapshot: dict) -> None:
     st.markdown("### 📋 Gold Closed Trades")
     view_cols = [
         c for c in [
-            "deal_ticket", "order_ticket", "position_id", "symbol", "trade_direction",
-            "deal_type", "entry_type", "volume", "price", "net_result", "deal_time"
+            "position_id", "order_ticket", "deal_ticket", "symbol", "trade_direction",
+            "entry_price", "exit_price", "volume", "net_result", "exit_deals", "deal_time"
         ] if c in trades.columns
     ]
     if view_cols:
         st.dataframe(trades[view_cols].sort_values("deal_time", ascending=False).head(100), use_container_width=True, hide_index=True)
 
-    st.caption("หมายเหตุ: Performance นี้เป็นผลจริงจาก MT5 Trade History ของ Gold เท่านั้น; ยังไม่อนุมานเหตุผลของกำไร/ขาดทุน และ Realized R จะมีเฉพาะ Trade ที่จับคู่กับ Locked Plan และมีข้อมูล Exit/SL เพียงพอ")
+    st.caption("หมายเหตุ: 1 แถว = 1 MT5 Position lifecycle; Direction มาจาก IN/open leg และ OUT/partial-close หลายดีลของ position เดียวกันจะถูกรวมเป็น Trade เดียว")
 
 
 def page_performance_baseline(snapshot: dict) -> None:
