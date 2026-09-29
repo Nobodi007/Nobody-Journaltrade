@@ -9,6 +9,7 @@ streamlit run app.py
 from __future__ import annotations
 
 import json
+import uuid
 
 import requests
 import pandas as pd
@@ -1813,6 +1814,255 @@ def page_trading_dna(snapshot: dict) -> None:
     st.info("Trading DNA ตอนนี้เป็น pattern detection จาก Closed Trade เท่านั้น · ยังไม่มี Entry→Exit pairing ที่สมบูรณ์สำหรับ RR/MAE/MFE และยังไม่ตีความเป็นเหตุผลทางจิตวิทยา")
     st.caption("Step 4 · descriptive pattern detection เท่านั้น · ไม่มี strategy score, prediction, auto-trading หรือ recommendation")
 
+# =========================================================
+# GOLD TECHNICAL MODEL v1 — PRE-TRADE SETUP
+# =========================================================
+
+GOLD_SYMBOLS = ("XAUUSD", "GOLD", "XAUUSDm", "XAUUSD.")
+
+def _supabase_headers(api_key: str, content_type: bool = False) -> dict:
+    h = {
+        "apikey": api_key,
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+    }
+    if content_type:
+        h["Content-Type"] = "application/json"
+        h["Prefer"] = "return=representation"
+    return h
+
+
+def _gold_symbol_allowed(symbol: str) -> bool:
+    s = str(symbol or "").upper().strip()
+    return s in GOLD_SYMBOLS
+
+
+def _planned_rr(direction: str, entry: float, sl: float, tp: float):
+    try:
+        entry, sl, tp = float(entry), float(sl), float(tp)
+    except (TypeError, ValueError):
+        return None
+    if direction == "LONG":
+        risk = entry - sl
+        reward = tp - entry
+    else:
+        risk = sl - entry
+        reward = entry - tp
+    if risk <= 0 or reward < 0:
+        return None
+    return reward / risk
+
+
+def _setup_post(row: dict) -> tuple[bool, str, dict | None]:
+    base_url, api_key = get_supabase_config()
+    if not base_url or not api_key:
+        return False, "ยังไม่ได้ตั้งค่า SUPABASE_URL / SUPABASE_KEY", None
+    try:
+        r = requests.post(
+            f"{base_url}/rest/v1/trade_setup_plans",
+            headers=_supabase_headers(api_key, True),
+            json=row,
+            timeout=10,
+        )
+        if r.status_code not in (200, 201):
+            return False, f"Supabase HTTP={r.status_code}: {r.text[:500]}", None
+        data = r.json()
+        return True, "บันทึก Trade Setup แล้ว", data[0] if isinstance(data, list) and data else row
+    except Exception as exc:
+        return False, str(exc), None
+
+
+def _setup_patch_locked(setup_id: str) -> tuple[bool, str]:
+    base_url, api_key = get_supabase_config()
+    if not base_url or not api_key:
+        return False, "ยังไม่ได้ตั้งค่า Supabase"
+    try:
+        r = requests.patch(
+            f"{base_url}/rest/v1/trade_setup_plans",
+            params={"setup_id": f"eq.{setup_id}", "status": "eq.PLANNED"},
+            headers=_supabase_headers(api_key, True),
+            json={"status": "LOCKED", "locked_at": pd.Timestamp.now(tz="UTC").isoformat()},
+            timeout=10,
+        )
+        if r.status_code not in (200, 204):
+            return False, f"Supabase HTTP={r.status_code}: {r.text[:500]}"
+        return True, "ล็อกแผนแล้ว — แก้ไขไม่ได้ในระบบ"
+    except Exception as exc:
+        return False, str(exc)
+
+
+@st.cache_data(ttl=5, show_spinner=False)
+def fetch_trade_setup_plans(snapshot: dict) -> list[dict]:
+    base_url, api_key = get_supabase_config()
+    if not base_url or not api_key:
+        return []
+    params = [("select", "*"), ("order", "created_at.desc"), ("limit", "50")]
+    if snapshot.get("login") not in (None, ""):
+        params.append(("login", f"eq.{snapshot.get('login')}"))
+    if snapshot.get("server") not in (None, ""):
+        params.append(("server", f"eq.{snapshot.get('server')}"))
+    try:
+        r = requests.get(
+            f"{base_url}/rest/v1/trade_setup_plans",
+            headers=_supabase_headers(api_key),
+            params=params,
+            timeout=10,
+        )
+        r.raise_for_status()
+        data = r.json()
+        return data if isinstance(data, list) else []
+    except Exception as exc:
+        st.session_state["supabase_error_trade_setup_plans"] = str(exc)
+        return []
+
+
+def page_new_trade_setup(snapshot: dict) -> None:
+    """Gold-only M5 pre-trade plan. Plan can be created, then explicitly locked."""
+    st.markdown('<div class="nj-section-title">📝 New Trade Setup</div>', unsafe_allow_html=True)
+    st.caption("Gold Technical Model v1 · XAUUSD/GOLD เท่านั้น · M5 เท่านั้น · Pre-trade plan ก่อนเข้าออเดอร์")
+
+    if not snapshot or snapshot.get("_error"):
+        st.warning("ยังไม่พบ Account Snapshot จาก Supabase")
+        return
+
+    st.warning("🔒 Technical Model นี้ใช้ได้เฉพาะ GOLD / XAUUSD และ M5 เท่านั้น — สินทรัพย์อื่นไม่อนุญาต")
+
+    plans = fetch_trade_setup_plans(snapshot)
+    if plans:
+        st.markdown("### แผนที่บันทึกไว้")
+        view = pd.DataFrame(plans)
+        cols = [c for c in ["setup_id", "symbol", "direction", "timeframe", "trend_state", "planned_rr", "status", "created_at", "locked_at"] if c in view.columns]
+        st.dataframe(view[cols], use_container_width=True, hide_index=True)
+        for p in plans[:10]:
+            sid = str(p.get("setup_id", ""))
+            status = str(p.get("status", ""))
+            if status == "PLANNED" and sid:
+                if st.button(f"🔒 Lock {sid}", key=f"lock_setup_{sid}", use_container_width=False):
+                    ok, msg = _setup_patch_locked(sid)
+                    if ok:
+                        st.success(msg)
+                        fetch_trade_setup_plans.clear()
+                        st.rerun()
+                    else:
+                        st.error(msg)
+    else:
+        st.info("ยังไม่มี Trade Setup ที่บันทึกไว้")
+
+    st.markdown("### สร้างแผนใหม่")
+    with st.form("gold_trade_setup_form", clear_on_submit=False):
+        c1, c2, c3 = st.columns(3)
+        symbol = c1.selectbox("สินทรัพย์", ["XAUUSD"], index=0)
+        direction = c2.selectbox("Direction", ["LONG", "SHORT"])
+        timeframe = c3.selectbox("Timeframe", ["M5"], index=0)
+
+        st.markdown("#### 1. Trend Change / Market Regime")
+        c1, c2 = st.columns(2)
+        trend_state = c1.selectbox(
+            "สถานะ Trend",
+            ["Trend Change Confirmed", "Trend Change Candidate", "Existing Trend"],
+            index=0,
+        )
+        ema200_break_price = c2.number_input("EMA200 Break — ราคาปิด M5", min_value=0.0, value=0.0, format="%.5f")
+        st.caption("Candidate = ราคาปิดข้าม EMA200 แล้ว แต่ยังไม่ยืนยัน · Confirmed = มี X/IDM + Valid BOS ครบแล้ว")
+
+        st.markdown("#### 2. Structure")
+        c1, c2, c3 = st.columns(3)
+        x_price = c1.number_input("X / IDM Price", min_value=0.0, value=0.0, format="%.5f")
+        bos_price = c2.number_input("BOS Price", min_value=0.0, value=0.0, format="%.5f")
+        bos_swing_high = c3.number_input("BOS Swing High", min_value=0.0, value=0.0, format="%.5f")
+        c1, c2, c3 = st.columns(3)
+        bos_swing_low = c1.number_input("BOS Swing Low", min_value=0.0, value=0.0, format="%.5f")
+        fvg_high = c2.number_input("FVG High", min_value=0.0, value=0.0, format="%.5f")
+        fvg_low = c3.number_input("FVG Low", min_value=0.0, value=0.0, format="%.5f")
+        st.caption("กฎ: X/IDM → BOS และ FVG ต้องอยู่ภายใน BOS Swing")
+
+        st.markdown("#### 3. Trade Plan")
+        c1, c2, c3 = st.columns(3)
+        entry = c1.number_input("Planned Entry", min_value=0.0, value=0.0, format="%.5f")
+        sl = c2.number_input("Stop Loss", min_value=0.0, value=0.0, format="%.5f")
+        tp = c3.number_input("Take Profit", min_value=0.0, value=0.0, format="%.5f")
+        rr = _planned_rr(direction, entry, sl, tp)
+        st.metric("Planned RR", f"1 : {rr:.2f}" if rr is not None else "—")
+
+        st.markdown("#### 4. Evidence")
+        screenshot_url = st.text_input("ลิงก์ Screenshot กราฟ (optional)", placeholder="https://...")
+        notes = st.text_area("Trade Thesis / Notes", height=110, placeholder="เหตุผลของแผนก่อนเข้าเทรด...")
+
+        submitted = st.form_submit_button("💾 Save Trade Plan", type="primary", use_container_width=True)
+
+    if submitted:
+        errors = []
+        if not _gold_symbol_allowed(symbol):
+            errors.append("Technical Model อนุญาตเฉพาะ GOLD / XAUUSD")
+        if timeframe != "M5":
+            errors.append("Technical Model อนุญาตเฉพาะ M5")
+        if trend_state == "Trend Change Confirmed" and (x_price <= 0 or bos_price <= 0):
+            errors.append("Trend Change Confirmed ต้องมี X/IDM และ BOS price")
+        if fvg_high > 0 and fvg_low > 0 and bos_swing_high > 0 and bos_swing_low > 0:
+            if not (bos_swing_low <= fvg_low <= fvg_high <= bos_swing_high):
+                errors.append("FVG ต้องอยู่ภายใน BOS Swing")
+        if rr is None:
+            errors.append("Entry / SL / TP ไม่สอดคล้องกับ Direction จึงคำนวณ RR ไม่ได้")
+
+        if errors:
+            for e in errors:
+                st.error(e)
+        else:
+            row = {
+                "setup_id": f"GOLD-{uuid.uuid4().hex[:10].upper()}",
+                "login": snapshot.get("login"),
+                "server": snapshot.get("server"),
+                "symbol": "XAUUSD",
+                "direction": direction,
+                "timeframe": "M5",
+                "trend_state": trend_state,
+                "ema200_break_price": ema200_break_price or None,
+                "x_price": x_price or None,
+                "bos_price": bos_price or None,
+                "bos_swing_high": bos_swing_high or None,
+                "bos_swing_low": bos_swing_low or None,
+                "fvg_high": fvg_high or None,
+                "fvg_low": fvg_low or None,
+                "entry_price": entry or None,
+                "stop_loss": sl or None,
+                "take_profit": tp or None,
+                "planned_rr": rr,
+                "screenshot_url": screenshot_url.strip() or None,
+                "notes": notes.strip() or None,
+                "status": "PLANNED",
+            }
+            ok, msg, saved = _setup_post(row)
+            if ok:
+                st.success(f"{msg} · {saved.get('setup_id', row['setup_id'])}")
+                fetch_trade_setup_plans.clear()
+                st.rerun()
+            else:
+                st.error(msg)
+
+    st.markdown("### Model Rules — Locked v1")
+    st.code("""GOLD / XAUUSD ONLY
+M5 ONLY
+
+M5 candle CLOSE crosses EMA200
+        ↓
+Trend Change Candidate
+        ↓
+X / IDM
+        ↓
+Valid BOS (กฎ BOS เดิมครบ)
+        ↓
+Trend Change Confirmed
+        ↓
+Focus New Trend
+        ↓
+X → BOS → BOS Swing → FVG inside BOS Swing → Retrace → Entry
+
+EMA200 = regime filter, not entry trigger
+Wick ผ่าน EMA200 อย่างเดียว = ไม่ยืนยัน Trend Change
+""", language="text")
+
+
+
 def page_performance_baseline(snapshot: dict) -> None:
     """Step 1: factual trading-performance baseline from MT5 deal history."""
     st.markdown('<div class="nj-section-title">Trading Performance Baseline</div>', unsafe_allow_html=True)
@@ -2016,7 +2266,7 @@ def page_journal(df: pd.DataFrame, store: NoteStore, aid: str) -> None:
 # MAIN
 # =========================================================
 
-NAV = ["📊 Dashboard", "📈 Trading Performance", "📊 Performance Breakdown", "🧠 Trading Behavior", "🧬 Trading DNA", "📐 Portfolio Exposure", "🛡️ Risk Engine", "🧠 Decision Engine", "🟡 ไม้ที่เปิดอยู่", "📓 Journal", "🔌 เชื่อมต่อบัญชี"]
+NAV = ["📊 Dashboard", "📝 New Trade Setup", "📈 Trading Performance", "📊 Performance Breakdown", "🧠 Trading Behavior", "🧬 Trading DNA", "📐 Portfolio Exposure", "🛡️ Risk Engine", "🧠 Decision Engine", "🟡 ไม้ที่เปิดอยู่", "📓 Journal", "🔌 เชื่อมต่อบัญชี"]
 
 
 def main() -> None:
@@ -2055,6 +2305,9 @@ def main() -> None:
     if not token and supabase_url and supabase_key:
         if page == "📊 Dashboard":
             page_supabase_dashboard(fetch_latest_mt5_snapshot())
+            return
+        if page == "📝 New Trade Setup":
+            page_new_trade_setup(fetch_latest_mt5_snapshot())
             return
         if page == "📈 Trading Performance":
             page_performance_baseline(fetch_latest_mt5_snapshot())
