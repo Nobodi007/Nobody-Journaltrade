@@ -1649,6 +1649,170 @@ def page_behavior_analysis(snapshot: dict) -> None:
 
     st.caption("Step 3 เป็น descriptive analysis จาก Trade History เท่านั้น · ยังไม่ทำ AI inference, psychology diagnosis, strategy scoring, prediction หรือ auto-trading")
 
+
+def _trading_dna_rows(trades: pd.DataFrame) -> pd.DataFrame:
+    """Create descriptive pattern rows for Step 4 without scoring or prediction."""
+    if trades is None or trades.empty:
+        return pd.DataFrame()
+    w = trades.copy()
+    w["net_result"] = pd.to_numeric(w.get("net_result"), errors="coerce").fillna(0.0)
+    if "deal_time" in w.columns:
+        w["deal_time"] = pd.to_datetime(w["deal_time"], errors="coerce", utc=True)
+        w = w.sort_values("deal_time", kind="stable").reset_index(drop=True)
+    else:
+        w["deal_time"] = pd.NaT
+
+    # Use the same best-effort direction logic as Performance Breakdown.
+    if "trade_direction" not in w.columns:
+        w["trade_direction"] = w.get("deal_type", "Unknown").astype(str).str.upper()
+    if "symbol" not in w.columns:
+        w["symbol"] = "Unknown"
+    w["symbol"] = w["symbol"].astype(str)
+    w["time_bucket"] = pd.cut(
+        w["deal_time"].dt.hour,
+        bins=[-1, 6, 12, 18, 24],
+        labels=["00–06", "07–12", "13–18", "19–24"],
+    )
+    w["day_of_week"] = w["deal_time"].dt.day_name()
+    return w
+
+
+def _dna_group_table(w: pd.DataFrame, key: str, label: str) -> pd.DataFrame:
+    if w.empty or key not in w.columns:
+        return pd.DataFrame()
+    rows = []
+    for value, g in w.groupby(key, dropna=False, observed=False):
+        r = pd.to_numeric(g["net_result"], errors="coerce").fillna(0.0)
+        wins = int((r > 0).sum())
+        losses = int((r < 0).sum())
+        gp = float(r[r > 0].sum())
+        gl = float(abs(r[r < 0].sum()))
+        rows.append({
+            label: "Unknown" if pd.isna(value) else str(value),
+            "Trades": int(len(r)),
+            "Win Rate": (wins / len(r) * 100.0) if len(r) else 0.0,
+            "Net P&L": float(r.sum()),
+            "Profit Factor": (gp / gl) if gl > 0 else None,
+            "Expectancy": float(r.mean()) if len(r) else 0.0,
+        })
+    return pd.DataFrame(rows)
+
+
+def page_trading_dna(snapshot: dict) -> None:
+    """Step 4: Trading DNA / recurring descriptive patterns."""
+    st.markdown('<div class="nj-section-title">Trading DNA</div>', unsafe_allow_html=True)
+    st.caption("Step 4 · รวม Performance + Breakdown + Behavior เพื่อหา Pattern ที่เกิดซ้ำ · ไม่ใช่คะแนน ไม่ใช่คำทำนาย และไม่ใช่คำแนะนำซื้อขาย")
+
+    if not snapshot or snapshot.get("_error"):
+        st.warning("ยังไม่พบ Account Snapshot จาก Supabase")
+        return
+
+    history = fetch_mt5_history_supabase(snapshot)
+    trades = _performance_breakdown_rows(history)
+    if trades.empty:
+        st.info("ยังไม่มี Closed Trade สำหรับสร้าง Trading DNA")
+        return
+
+    w = _trading_dna_rows(trades)
+    total = len(w)
+    result = pd.to_numeric(w["net_result"], errors="coerce").fillna(0.0)
+
+    # Descriptive dominant dimensions.
+    def dominant(key):
+        x = w[key].dropna().astype(str) if key in w.columns else pd.Series(dtype=str)
+        return x.value_counts().index[0] if len(x) else "Unknown"
+
+    dominant_symbol = dominant("symbol")
+    dominant_direction = dominant("trade_direction")
+    dominant_session = dominant("time_bucket")
+    dominant_day = dominant("day_of_week")
+
+    gaps = w["deal_time"].diff().dt.total_seconds().div(60.0)
+    valid_gaps = gaps[(gaps.notna()) & (gaps >= 0)]
+    median_gap = float(valid_gaps.median()) if len(valid_gaps) else None
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Closed Trades", f"{total:,}")
+    c2.metric("Most Frequent Symbol", dominant_symbol)
+    c3.metric("Most Frequent Direction", dominant_direction)
+    c4.metric("Median Gap", f"{median_gap:.0f} min" if median_gap is not None else "—")
+
+    st.markdown("### Pattern Snapshot")
+    snapshot_rows = [
+        {"Dimension": "Most frequent symbol", "Observed pattern": dominant_symbol, "Measure": int((w["symbol"] == dominant_symbol).sum())},
+        {"Dimension": "Most frequent direction", "Observed pattern": dominant_direction, "Measure": int((w["trade_direction"] == dominant_direction).sum())},
+        {"Dimension": "Most frequent time bucket", "Observed pattern": dominant_session, "Measure": int((w["time_bucket"].astype(str) == dominant_session).sum())},
+        {"Dimension": "Most frequent day", "Observed pattern": dominant_day, "Measure": int((w["day_of_week"] == dominant_day).sum())},
+    ]
+    st.dataframe(pd.DataFrame(snapshot_rows), use_container_width=True, hide_index=True)
+
+    st.markdown("### Symbol Fingerprint")
+    by_symbol = _dna_group_table(w, "symbol", "Symbol")
+    if not by_symbol.empty:
+        by_symbol = by_symbol.sort_values(["Trades", "Net P&L"], ascending=[False, False], kind="stable")
+        st.dataframe(by_symbol.style.format({
+            "Win Rate": "{:.2f}%",
+            "Net P&L": "{:+,.2f}",
+            "Profit Factor": lambda x: "—" if pd.isna(x) else f"{x:.2f}",
+            "Expectancy": "{:+,.2f}",
+        }), use_container_width=True, hide_index=True)
+
+    st.markdown("### Session Fingerprint")
+    by_session = _dna_group_table(w, "time_bucket", "Time")
+    if not by_session.empty:
+        order = {"00–06": 0, "07–12": 1, "13–18": 2, "19–24": 3}
+        by_session["_order"] = by_session["Time"].map(order).fillna(99)
+        by_session = by_session.sort_values("_order", kind="stable").drop(columns="_order")
+        st.dataframe(by_session.style.format({
+            "Win Rate": "{:.2f}%",
+            "Net P&L": "{:+,.2f}",
+            "Profit Factor": lambda x: "—" if pd.isna(x) else f"{x:.2f}",
+            "Expectancy": "{:+,.2f}",
+        }), use_container_width=True, hide_index=True)
+
+    st.markdown("### Size / Outcome Pattern")
+    if "volume" in w.columns:
+        w["volume"] = pd.to_numeric(w["volume"], errors="coerce")
+        size_rows = []
+        for name, mask in [("Winning", w["net_result"] > 0), ("Losing", w["net_result"] < 0), ("All", w["net_result"].notna())]:
+            vals = w.loc[mask, "volume"].dropna()
+            size_rows.append({
+                "Group": name,
+                "Trades": int(len(vals)),
+                "Average Volume": float(vals.mean()) if len(vals) else None,
+                "Median Volume": float(vals.median()) if len(vals) else None,
+            })
+        st.dataframe(pd.DataFrame(size_rows).style.format({
+            "Average Volume": lambda x: "—" if pd.isna(x) else f"{x:.4f}",
+            "Median Volume": lambda x: "—" if pd.isna(x) else f"{x:.4f}",
+        }), use_container_width=True, hide_index=True)
+    else:
+        st.info("Trade History ชุดนี้ไม่มี volume สำหรับวิเคราะห์ขนาด Position")
+
+    st.markdown("### Repeating Sequences")
+    seq = []
+    for i in range(1, len(w)):
+        gap = gaps.iloc[i]
+        if pd.isna(gap):
+            continue
+        prev = w.iloc[i - 1]
+        cur = w.iloc[i]
+        if gap <= 30:
+            seq.append({
+                "Pattern": f"{str(prev['net_result'] > 0 and 'Win' or 'Loss')} → next trade ≤30 min",
+                "Count": 1,
+                "Symbol": cur.get("symbol", "Unknown"),
+            })
+    if seq:
+        seq_df = pd.DataFrame(seq).groupby(["Pattern", "Symbol"], as_index=False)["Count"].sum().sort_values("Count", ascending=False)
+        st.dataframe(seq_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("ยังไม่พบ sequence ภายใน 30 นาทีจากข้อมูลชุดนี้")
+
+    st.markdown("### Current Data Limits")
+    st.info("Trading DNA ตอนนี้เป็น pattern detection จาก Closed Trade เท่านั้น · ยังไม่มี Entry→Exit pairing ที่สมบูรณ์สำหรับ RR/MAE/MFE และยังไม่ตีความเป็นเหตุผลทางจิตวิทยา")
+    st.caption("Step 4 · descriptive pattern detection เท่านั้น · ไม่มี strategy score, prediction, auto-trading หรือ recommendation")
+
 def page_performance_baseline(snapshot: dict) -> None:
     """Step 1: factual trading-performance baseline from MT5 deal history."""
     st.markdown('<div class="nj-section-title">Trading Performance Baseline</div>', unsafe_allow_html=True)
@@ -1852,7 +2016,7 @@ def page_journal(df: pd.DataFrame, store: NoteStore, aid: str) -> None:
 # MAIN
 # =========================================================
 
-NAV = ["📊 Dashboard", "📈 Trading Performance", "📊 Performance Breakdown", "🧠 Trading Behavior", "📐 Portfolio Exposure", "🛡️ Risk Engine", "🧠 Decision Engine", "🟡 ไม้ที่เปิดอยู่", "📓 Journal", "🔌 เชื่อมต่อบัญชี"]
+NAV = ["📊 Dashboard", "📈 Trading Performance", "📊 Performance Breakdown", "🧠 Trading Behavior", "🧬 Trading DNA", "📐 Portfolio Exposure", "🛡️ Risk Engine", "🧠 Decision Engine", "🟡 ไม้ที่เปิดอยู่", "📓 Journal", "🔌 เชื่อมต่อบัญชี"]
 
 
 def main() -> None:
@@ -1889,46 +2053,46 @@ def main() -> None:
 
     # Free architecture: ถ้าไม่มี MetaApi ให้ใช้ MT5 -> Supabase เป็นแหล่งข้อมูลหลัก
     if not token and supabase_url and supabase_key:
-        if page == NAV[0]:
+        if page == "📊 Dashboard":
             page_supabase_dashboard(fetch_latest_mt5_snapshot())
             return
-        if page == NAV[1]:
+        if page == "📈 Trading Performance":
             page_performance_baseline(fetch_latest_mt5_snapshot())
             return
-        if page == NAV[2]:
+        if page == "📊 Performance Breakdown":
             page_performance_breakdown(fetch_latest_mt5_snapshot())
             return
-        if page == NAV[3]:
+        if page == "🧠 Trading Behavior":
             page_behavior_analysis(fetch_latest_mt5_snapshot())
             return
-        if page == NAV[4]:
+        if page == "🧬 Trading DNA":
+            page_trading_dna(fetch_latest_mt5_snapshot())
+            return
+        if page == "📐 Portfolio Exposure":
             page_exposure(fetch_latest_mt5_snapshot())
             return
-        if page == NAV[5]:
+        if page == "🛡️ Risk Engine":
             page_risk_engine(fetch_latest_mt5_snapshot())
             return
-        if page == NAV[6]:
+        if page == "🧠 Decision Engine":
             page_decision_engine(fetch_latest_mt5_snapshot())
             return
-        if page == NAV[7]:
+        if page == "🟡 ไม้ที่เปิดอยู่":
             page_live_monitor(fetch_latest_mt5_snapshot())
             return
-        if page == NAV[9]:
+        if page == "🔌 เชื่อมต่อบัญชี":
             st.subheader("🔌 MT5 Collector")
             st.success("Supabase เชื่อมต่อแล้ว — NobodyCollector กำลังส่งข้อมูลจาก MT5", icon="✅")
             st.code("MT5 → NobodyCollector → Supabase → Nobody Trade Journal", language="text")
             st.caption("Account / Positions / Pending / Trade History พร้อมอ่านจาก Supabase")
             return
-        if page == NAV[8]:
+        if page == "📓 Journal":
             st.info(
                 "Journal เดิมยังใช้ระบบโน้ตเดิมอยู่ · การเชื่อม Trade History จาก Supabase เข้ากับ Journal จะทำในขั้นถัดไป",
                 icon="ℹ️",
             )
             return
-        st.info(
-            "หน้า Journal เดิมยังคงใช้ระบบโน้ตเดิมอยู่ รอบถัดไปค่อยเชื่อม Trade History จาก Supabase เข้ากับ Journal",
-            icon="ℹ️",
-        )
+        st.info("ยังไม่มีเนื้อหาสำหรับเมนูนี้")
         return
 
     if not token:
@@ -1940,7 +2104,7 @@ def main() -> None:
         )
         st.stop()
 
-    if page == NAV[8]:
+    if page == "📓 Journal":
         page_connect(token, region)
         return
 
@@ -1996,17 +2160,17 @@ def main() -> None:
 
     acc_region = acc.get("region") or region
     store = get_store()
-    if page in (NAV[1], NAV[2], NAV[3], NAV[4], NAV[5]):
+    if page in ("📈 Trading Performance", "📊 Performance Breakdown", "🧠 Trading Behavior", "🧬 Trading DNA", "📐 Portfolio Exposure", "🛡️ Risk Engine"):
         st.info("หน้านี้ใช้ข้อมูล MT5 → Supabase ในโหมด Free Architecture; กรุณาใช้โหมด Supabase")
         return
     try:
-        if page == NAV[6]:
+        if page == "🧠 Decision Engine":
             page_open(fetch_positions(token, acc_region, aid))
             return
         with st.spinner("กำลังดึงประวัติเทรด..."):
             trades = fetch_history(token, acc_region, aid, days)
         df = merge_notes(trades, store.load(aid))
-        if page == NAV[7]:
+        if page == "🟡 ไม้ที่เปิดอยู่":
             page_journal(df, store, aid)
             return
         try:
