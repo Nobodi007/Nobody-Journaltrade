@@ -132,6 +132,33 @@ section[data-testid="stSidebar"] hr { border-color:#272d37 !important; margin:.9
 .nj-side-value { color:#e8edf4; font-size:.83rem; font-weight:720; margin-top:3px; line-height:1.35; }
 
 /* Cards / hero */
+
+/* Gold Trading Workspace */
+.gold-workspace-head {
+  display:flex; justify-content:space-between; align-items:center; gap:16px;
+  padding:14px 16px; margin:4px 0 12px;
+  border:1px solid rgba(148,163,184,.16); border-radius:14px;
+  background:linear-gradient(135deg, rgba(22,29,40,.96), rgba(12,17,24,.96));
+}
+.gold-workspace-title { font-size:1.18rem; font-weight:800; color:#f3f6fa; }
+.gold-workspace-subtitle { margin-top:3px; color:#8e9bad; font-size:.82rem; }
+.gold-workspace-badge {
+  flex:0 0 auto; padding:7px 10px; border-radius:999px;
+  border:1px solid rgba(32,214,138,.25); background:rgba(32,214,138,.07);
+  color:#9ce9c4; font-size:.74rem; font-weight:750;
+}
+.gold-workspace-note {
+  display:flex; gap:10px; align-items:flex-start; margin:10px 0 18px; padding:11px 14px;
+  border:1px solid rgba(148,163,184,.14); border-radius:12px;
+  background:rgba(17,24,34,.72); color:#9ba7b7; font-size:.79rem;
+}
+.gold-workspace-note b { display:block; color:#e5eaf0; margin-bottom:2px; }
+.gold-workspace-note span { display:block; }
+@media (max-width: 700px) {
+  .gold-workspace-head { align-items:flex-start; flex-direction:column; }
+  .gold-workspace-badge { width:max-content; }
+}
+
 .nj-hero {
   background:radial-gradient(circle at top right,rgba(83,126,205,.14),transparent 38%),linear-gradient(145deg,#1a202b,#12151c);
   border:1px solid #2a3240;
@@ -1919,47 +1946,92 @@ def fetch_trade_setup_plans(snapshot: dict) -> list[dict]:
 
 def render_gold_tradingview_chart() -> None:
     """Gold-only TradingView Advanced Chart workspace."""
-    st.markdown("### 📈 Gold Trading Workspace")
-    st.caption("PEPPERSTONE:XAUUSD · M5 · ใช้สำหรับวิเคราะห์กราฟเท่านั้น · ราคา/บัญชีจริงยังมาจาก MT5 → Supabase")
+    st.markdown(
+        '''
+        <div class="gold-workspace-head">
+          <div>
+            <div class="gold-workspace-title">📈 Gold Trading Workspace</div>
+            <div class="gold-workspace-subtitle">XAUUSD · M5 · TradingView สำหรับวิเคราะห์โครงสร้างเท่านั้น</div>
+          </div>
+          <div class="gold-workspace-badge">● PEPPERSTONE · XAUUSD</div>
+        </div>
+        ''',
+        unsafe_allow_html=True,
+    )
 
     chart_html = r'''
-    <div class="tradingview-widget-container" style="height:700px;width:100%;">
-      <div class="tradingview-widget-container__widget" style="height:calc(100% - 32px);width:100%;"></div>
-      <div class="tradingview-widget-copyright" style="font-size:11px;">
-        <a href="https://www.tradingview.com/symbols/XAUUSD/?exchange=PEPPERSTONE" rel="noopener nofollow" target="_blank">
-          XAUUSD chart by TradingView
-        </a>
-      </div>
-      <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
-      {
-        "autosize": true,
-        "symbol": "PEPPERSTONE:XAUUSD",
-        "interval": "5",
-        "timezone": "Asia/Bangkok",
-        "theme": "dark",
-        "style": "1",
-        "locale": "th",
-        "allow_symbol_change": false,
-        "calendar": false,
-        "details": false,
-        "hide_side_toolbar": false,
-        "hide_top_toolbar": false,
-        "hide_legend": false,
-        "hide_volume": true,
-        "hotlist": false,
-        "withdateranges": true,
-        "save_image": false,
-        "show_popup_button": false,
-        "studies": ["MAExp@tv-basicstudies"],
-        "studies_overrides": {
-          "moving average exponential.length": 200
-        },
-        "support_host": "https://www.tradingview.com"
+    <style>
+      html, body { margin:0; padding:0; background:#0b0f14; overflow:hidden; }
+      .tv-shell {
+        width:100%; height:760px;
+        border:1px solid rgba(148,163,184,.18); border-radius:14px;
+        overflow:hidden; background:#0b0f14;
+        box-shadow:0 10px 35px rgba(0,0,0,.22);
       }
-      </script>
+      .tradingview-widget-container { width:100%; height:100%; }
+      .tradingview-widget-container__widget { width:100%; height:calc(100% - 28px); }
+      .tradingview-widget-copyright {
+        height:28px; display:flex; align-items:center; justify-content:center;
+        background:#0b0f14;
+      }
+      .tradingview-widget-copyright a {
+        color:#7f8ea3; text-decoration:none; font-size:11px;
+      }
+    </style>
+    <div class="tv-shell">
+      <div class="tradingview-widget-container">
+        <div class="tradingview-widget-container__widget"></div>
+        <div class="tradingview-widget-copyright">
+          <a href="https://www.tradingview.com/symbols/XAUUSD/?exchange=PEPPERSTONE" rel="noopener nofollow" target="_blank">
+            XAUUSD · TradingView
+          </a>
+        </div>
+        <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
+        {
+          "autosize": false,
+          "width": "100%",
+          "height": 732,
+          "symbol": "PEPPERSTONE:XAUUSD",
+          "interval": "5",
+          "timezone": "Asia/Bangkok",
+          "theme": "dark",
+          "style": "1",
+          "locale": "th",
+          "allow_symbol_change": false,
+          "calendar": false,
+          "details": false,
+          "hide_side_toolbar": false,
+          "hide_top_toolbar": false,
+          "hide_legend": false,
+          "hide_volume": true,
+          "hotlist": false,
+          "withdateranges": true,
+          "save_image": false,
+          "show_popup_button": false,
+          "studies": ["MAExp@tv-basicstudies"],
+          "studies_overrides": {
+            "moving average exponential.length": 200
+          },
+          "support_host": "https://www.tradingview.com"
+        }
+        </script>
+      </div>
     </div>
     '''
-    components.html(chart_html, height=720, scrolling=False)
+    components.html(chart_html, height=780, scrolling=False)
+
+    st.markdown(
+        '''
+        <div class="gold-workspace-note">
+          <span>🧠</span>
+          <div>
+            <b>Gold Technical Model v1</b>
+            <span>M5 Close → EMA200 → X/IDM → BOS → BOS Swing → FVG → Retrace → Entry</span>
+          </div>
+        </div>
+        ''',
+        unsafe_allow_html=True,
+    )
 
 
 def fetch_gold_position_price(snapshot: dict) -> float | None:
