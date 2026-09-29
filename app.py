@@ -1919,36 +1919,12 @@ def _setup_patch_locked(setup_id: str) -> tuple[bool, str]:
         return False, str(exc)
 
 
-def _setup_soft_delete(setup_id: str) -> tuple[bool, str]:
-    """Hide a PLANNED test/setup from the plan list without hard-deleting audit data.
-
-    Only PLANNED rows can be deleted. LOCKED plans are intentionally protected.
-    This uses the existing UPDATE permission, so no new Supabase DELETE policy is required.
-    """
-    base_url, api_key = get_supabase_config()
-    if not base_url or not api_key:
-        return False, "ยังไม่ได้ตั้งค่า Supabase"
-    try:
-        r = requests.patch(
-            f"{base_url}/rest/v1/trade_setup_plans",
-            params={"setup_id": f"eq.{setup_id}", "status": "eq.PLANNED"},
-            headers=_supabase_headers(api_key, True),
-            json={"status": "DELETED"},
-            timeout=10,
-        )
-        if r.status_code not in (200, 204):
-            return False, f"Supabase HTTP={r.status_code}: {r.text[:500]}"
-        return True, "ลบแผนออกจากรายการแล้ว"
-    except Exception as exc:
-        return False, str(exc)
-
-
 @st.cache_data(ttl=5, show_spinner=False)
 def fetch_trade_setup_plans(snapshot: dict) -> list[dict]:
     base_url, api_key = get_supabase_config()
     if not base_url or not api_key:
         return []
-    params = [("select", "*"), ("status", "neq.DELETED"), ("order", "created_at.desc"), ("limit", "50")]
+    params = [("select", "*"), ("order", "created_at.desc"), ("limit", "50")]
     if snapshot.get("login") not in (None, ""):
         params.append(("login", f"eq.{snapshot.get('login')}"))
     if snapshot.get("server") not in (None, ""):
@@ -1969,7 +1945,7 @@ def fetch_trade_setup_plans(snapshot: dict) -> list[dict]:
 
 
 def render_gold_tradingview_chart() -> None:
-    """Gold M5 workspace using the free TradingView Advanced Chart embed."""
+    """Gold M5 workspace using the TradingView Advanced Chart embed."""
     st.markdown(
         """
         <div class="gold-workspace-head">
@@ -1983,17 +1959,24 @@ def render_gold_tradingview_chart() -> None:
         unsafe_allow_html=True,
     )
 
-    chart_html = r'''<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    chart_html = r"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 html,body{margin:0;padding:0;background:#0b0d10;overflow:hidden}
-.tv-wrap{height:680px;width:100%;border:1px solid #252c37;border-radius:14px;overflow:hidden;background:#0b0d10}
+.tv-wrap{height:720px;width:100%;border:1px solid #252c37;border-radius:14px;overflow:hidden;background:#0b0d10}
 .tradingview-widget-container,.tradingview-widget-container__widget{height:100%;width:100%}
-</style></head><body>
+</style>
+</head>
+<body>
 <div class="tv-wrap">
   <div class="tradingview-widget-container">
     <div class="tradingview-widget-container__widget"></div>
-    <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
+    <script type="text/javascript"
+      src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js"
+      async>
     {
       "autosize": true,
       "symbol": "PEPPERSTONE:XAUUSD",
@@ -2028,8 +2011,9 @@ html,body{margin:0;padding:0;background:#0b0d10;overflow:hidden}
     </script>
   </div>
 </div>
-</body></html>'''
-    components.html(chart_html, height=690, scrolling=False)
+</body>
+</html>"""
+    components.html(chart_html, height=730, scrolling=False)
 
     st.markdown(
         """
@@ -2095,32 +2079,18 @@ def page_new_trade_setup(snapshot: dict) -> None:
         view = pd.DataFrame(plans)
         cols = [c for c in ["setup_id", "symbol", "direction", "timeframe", "trend_state", "planned_rr", "status", "created_at", "locked_at"] if c in view.columns]
         st.dataframe(view[cols], use_container_width=True, hide_index=True)
-        st.caption("📝 PLANNED = แก้/ลบได้ · 🔒 LOCKED = ล็อกแล้วและจะไม่ให้ลบ เพื่อรักษาประวัติการวางแผน")
         for p in plans[:10]:
             sid = str(p.get("setup_id", ""))
             status = str(p.get("status", ""))
             if status == "PLANNED" and sid:
-                b1, b2 = st.columns([1, 1])
-                with b1:
-                    if st.button(f"🔒 Lock {sid}", key=f"lock_setup_{sid}", use_container_width=True):
-                        ok, msg = _setup_patch_locked(sid)
-                        if ok:
-                            st.success(msg)
-                            fetch_trade_setup_plans.clear()
-                            st.rerun()
-                        else:
-                            st.error(msg)
-                with b2:
-                    if st.button(f"🗑️ ลบ {sid}", key=f"delete_setup_{sid}", use_container_width=True):
-                        ok, msg = _setup_soft_delete(sid)
-                        if ok:
-                            st.success(msg)
-                            fetch_trade_setup_plans.clear()
-                            st.rerun()
-                        else:
-                            st.error(msg)
-            elif status == "LOCKED" and sid:
-                st.info(f"🔒 {sid} — LOCKED: ลบไม่ได้ เพื่อรักษาประวัติการวางแผน")
+                if st.button(f"🔒 Lock {sid}", key=f"lock_setup_{sid}", use_container_width=False):
+                    ok, msg = _setup_patch_locked(sid)
+                    if ok:
+                        st.success(msg)
+                        fetch_trade_setup_plans.clear()
+                        st.rerun()
+                    else:
+                        st.error(msg)
     else:
         st.info("ยังไม่มี Trade Setup ที่บันทึกไว้")
 
