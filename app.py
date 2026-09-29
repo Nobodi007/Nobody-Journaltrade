@@ -1945,13 +1945,13 @@ def fetch_trade_setup_plans(snapshot: dict) -> list[dict]:
 
 
 def render_gold_tradingview_chart() -> None:
-    """Gold-only TradingView Advanced Chart workspace."""
+    """Gold-only TradingView Advanced Chart workspace with full dark analysis toolbars."""
     st.markdown(
         '''
         <div class="gold-workspace-head">
           <div>
             <div class="gold-workspace-title">📈 Gold Trading Workspace</div>
-            <div class="gold-workspace-subtitle">XAUUSD · M5 · TradingView สำหรับวิเคราะห์โครงสร้างเท่านั้น</div>
+            <div class="gold-workspace-subtitle">XAUUSD · M5 · TradingView สำหรับวิเคราะห์ X / IDM / BOS / FVG</div>
           </div>
           <div class="gold-workspace-badge">● PEPPERSTONE · XAUUSD</div>
         </div>
@@ -1959,23 +1959,28 @@ def render_gold_tradingview_chart() -> None:
         unsafe_allow_html=True,
     )
 
+    # Advanced Chart widget: keep the full TradingView analysis UI visible.
+    # hide_side_toolbar=False enables the left drawing toolbar.
     chart_html = r'''
     <style>
-      html, body { margin:0; padding:0; background:#0b0f14; overflow:hidden; }
+      html, body {
+        margin:0; padding:0; background:#0b0d10; overflow:hidden;
+        color:#d7dde7;
+      }
       .tv-shell {
-        width:100%; height:760px;
-        border:1px solid rgba(148,163,184,.18); border-radius:14px;
-        overflow:hidden; background:#0b0f14;
-        box-shadow:0 10px 35px rgba(0,0,0,.22);
+        width:100%; height:820px;
+        border:1px solid #242a33; border-radius:14px;
+        overflow:hidden; background:#0b0d10;
+        box-shadow:0 14px 42px rgba(0,0,0,.34);
       }
       .tradingview-widget-container { width:100%; height:100%; }
       .tradingview-widget-container__widget { width:100%; height:calc(100% - 28px); }
       .tradingview-widget-copyright {
         height:28px; display:flex; align-items:center; justify-content:center;
-        background:#0b0f14;
+        background:#0b0d10;
       }
       .tradingview-widget-copyright a {
-        color:#7f8ea3; text-decoration:none; font-size:11px;
+        color:#657184; text-decoration:none; font-size:11px;
       }
     </style>
     <div class="tv-shell">
@@ -1988,29 +1993,33 @@ def render_gold_tradingview_chart() -> None:
         </div>
         <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
         {
-          "autosize": false,
-          "width": "100%",
-          "height": 732,
+          "autosize": true,
           "symbol": "PEPPERSTONE:XAUUSD",
           "interval": "5",
           "timezone": "Asia/Bangkok",
           "theme": "dark",
+          "backgroundColor": "#0b0d10",
+          "gridColor": "rgba(70,78,90,0.24)",
           "style": "1",
           "locale": "th",
           "allow_symbol_change": false,
-          "calendar": false,
-          "details": false,
           "hide_side_toolbar": false,
           "hide_top_toolbar": false,
           "hide_legend": false,
-          "hide_volume": true,
+          "hide_volume": false,
+          "withdateranges": false,
+          "calendar": false,
+          "details": false,
           "hotlist": false,
-          "withdateranges": true,
+          "watchlist": [],
+          "compareSymbols": [],
           "save_image": false,
           "show_popup_button": false,
           "studies": ["MAExp@tv-basicstudies"],
           "studies_overrides": {
-            "moving average exponential.length": 200
+            "moving average exponential.length": 200,
+            "moving average exponential.plot.color": "#3b9cff",
+            "moving average exponential.plot.linewidth": 2
           },
           "support_host": "https://www.tradingview.com"
         }
@@ -2018,7 +2027,7 @@ def render_gold_tradingview_chart() -> None:
       </div>
     </div>
     '''
-    components.html(chart_html, height=780, scrolling=False)
+    components.html(chart_html, height=840, scrolling=False)
 
     st.markdown(
         '''
