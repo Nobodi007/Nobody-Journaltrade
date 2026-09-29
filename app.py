@@ -1086,6 +1086,152 @@ def page_risk_engine(snapshot: dict) -> None:
 
     st.caption("เกณฑ์ในหน้านี้เป็นกฎ monitoring แบบตายตัวของแอป ไม่ใช่การคาดการณ์ตลาด และยังไม่มีการส่งคำสั่งอัตโนมัติ")
 
+
+def page_decision_engine(snapshot: dict) -> None:
+    """Portfolio Decision Engine v1: deterministic alerts from current portfolio state.
+    Read-only; does not predict markets or place orders.
+    """
+    st.markdown('<div class="nj-section-title">Portfolio Decision Engine</div>', unsafe_allow_html=True)
+    st.caption("Decision support จากข้อมูลพอร์ตปัจจุบัน · Rule-based · อ่านอย่างเดียว · ไม่ส่งคำสั่งซื้อขาย")
+
+    if not snapshot:
+        st.warning("ยังไม่พบ Account Snapshot จาก Supabase")
+        return
+    if snapshot.get("_error"):
+        st.error(f"อ่าน MT5 จาก Supabase ไม่สำเร็จ: {snapshot['_error']}")
+        return
+
+    pos = fetch_mt5_positions_supabase(snapshot)
+    pending = fetch_mt5_pending_supabase(snapshot)
+
+    balance = _num(snapshot.get("balance"))
+    equity = _num(snapshot.get("equity"))
+    margin = _num(snapshot.get("margin"))
+    free_margin = _num(snapshot.get("free_margin"))
+    floating = equity - balance
+
+    work = pos.copy()
+    if not work.empty:
+        for col in ["volume", "profit", "swap", "commission"]:
+            work[col] = pd.to_numeric(work.get(col), errors="coerce").fillna(0.0) if col in work.columns else 0.0
+        side = work.get("side", pd.Series(index=work.index, dtype=str)).astype(str).str.upper()
+        work["buy_lots"] = work["volume"].where(side.str.contains("BUY", na=False), 0.0)
+        work["sell_lots"] = work["volume"].where(side.str.contains("SELL", na=False), 0.0)
+    else:
+        work = pd.DataFrame(columns=["volume", "profit", "swap", "commission", "buy_lots", "sell_lots", "symbol"])
+
+    gross = float(work["volume"].sum()) if not work.empty else 0.0
+    buy = float(work["buy_lots"].sum()) if not work.empty else 0.0
+    sell = float(work["sell_lots"].sum()) if not work.empty else 0.0
+    net = buy - sell
+    margin_util = (margin / equity * 100.0) if equity > 0 else 0.0
+    free_ratio = (free_margin / equity * 100.0) if equity > 0 else 0.0
+    floating_loss_pct = (max(0.0, -floating) / equity * 100.0) if equity > 0 else 0.0
+    directional_pct = (abs(net) / gross * 100.0) if gross > 0 else 0.0
+
+    symbol_conc = 0.0
+    concentration_symbol = "-"
+    if not work.empty and "symbol" in work.columns and gross > 0:
+        by_symbol = work.groupby("symbol")["volume"].sum().sort_values(ascending=False)
+        if not by_symbol.empty:
+            concentration_symbol = str(by_symbol.index[0])
+            symbol_conc = float(by_symbol.iloc[0] / gross * 100.0)
+
+    alerts = []
+
+    def add(level, title, detail, action):
+        alerts.append({"level": level, "title": title, "detail": detail, "action": action})
+
+    if len(pos) == 0:
+        add("INFO", "ไม่มี Open Position", "ขณะนี้ไม่มี Position ที่เปิดอยู่ให้วิเคราะห์ Exposure", "รอข้อมูล Position ก่อนประเมิน Exposure")
+    else:
+        if margin_util >= 80:
+            add("CRITICAL", "Margin Utilization สูงมาก", f"Margin ใช้ {margin_util:.1f}% ของ Equity", "ตรวจสอบ Margin และ Free Margin ทันที")
+        elif margin_util >= 60:
+            add("HIGH", "Margin Utilization สูง", f"Margin ใช้ {margin_util:.1f}% ของ Equity", "ตรวจสอบการใช้ Margin และ buffer ที่เหลือ")
+        elif margin_util >= 40:
+            add("WATCH", "Margin Utilization เริ่มสูง", f"Margin ใช้ {margin_util:.1f}% ของ Equity", "ติดตาม Margin ต่อเนื่อง")
+
+        if free_ratio <= 10:
+            add("CRITICAL", "Free Margin ต่ำมาก", f"Free Margin เหลือ {free_ratio:.1f}% ของ Equity", "ตรวจสอบ buffer ของบัญชีทันที")
+        elif free_ratio <= 20:
+            add("HIGH", "Free Margin ต่ำ", f"Free Margin เหลือ {free_ratio:.1f}% ของ Equity", "ตรวจสอบ buffer ที่เหลือ")
+        elif free_ratio <= 40:
+            add("WATCH", "Free Margin ลดลง", f"Free Margin เหลือ {free_ratio:.1f}% ของ Equity", "ติดตาม buffer ต่อเนื่อง")
+
+        if floating_loss_pct >= 10:
+            add("CRITICAL", "Floating Loss สูง", f"ขาดทุนลอยตัว {floating_loss_pct:.2f}% ของ Equity", "ตรวจสอบ Position ที่เป็นต้นเหตุ")
+        elif floating_loss_pct >= 5:
+            add("HIGH", "Floating Loss สูงขึ้น", f"ขาดทุนลอยตัว {floating_loss_pct:.2f}% ของ Equity", "ตรวจสอบ Position และความเสี่ยงรวม")
+        elif floating_loss_pct >= 2:
+            add("WATCH", "มี Floating Loss", f"ขาดทุนลอยตัว {floating_loss_pct:.2f}% ของ Equity", "ติดตาม P&L ของ Position")
+
+        if directional_pct >= 95:
+            add("CRITICAL", "Directional Exposure กระจุกตัว", f"Net/Gross = {directional_pct:.1f}%", "ตรวจสอบการกระจุกตัวของฝั่ง BUY/SELL")
+        elif directional_pct >= 80:
+            add("HIGH", "Directional Exposure สูง", f"Net/Gross = {directional_pct:.1f}%", "ตรวจสอบสมดุลของ Exposure")
+        elif directional_pct >= 60:
+            add("WATCH", "Directional Exposure เอียง", f"Net/Gross = {directional_pct:.1f}%", "ติดตามสัดส่วน BUY/SELL")
+
+        if symbol_conc >= 95:
+            add("CRITICAL", "Symbol Concentration สูงมาก", f"{concentration_symbol} คิดเป็น {symbol_conc:.1f}% ของ Gross Lots", "ตรวจสอบการกระจุกตัวของ Symbol")
+        elif symbol_conc >= 80:
+            add("HIGH", "Symbol Concentration สูง", f"{concentration_symbol} คิดเป็น {symbol_conc:.1f}% ของ Gross Lots", "ตรวจสอบสัดส่วนของ Symbol หลัก")
+        elif symbol_conc >= 60:
+            add("WATCH", "Symbol Concentration สูงขึ้น", f"{concentration_symbol} คิดเป็น {symbol_conc:.1f}% ของ Gross Lots", "ติดตามสัดส่วนของ Symbol หลัก")
+
+        if "stop_loss" in work.columns:
+            no_sl = work["stop_loss"].fillna(0).astype(float).eq(0).sum()
+            if no_sl:
+                add("WATCH", "มี Position ไม่มี Stop Loss", f"พบ {int(no_sl)} จาก {len(work)} Position ที่ไม่มี Stop Loss", "ตรวจสอบ Position ที่ไม่มี Stop Loss")
+
+    if len(pending) > 0:
+        add("INFO", "มี Pending Orders", f"พบ Pending Orders {len(pending)} รายการ", "ตรวจสอบรายการ Pending และเงื่อนไขที่ตั้งไว้")
+
+    severity = {"INFO":0, "WATCH":1, "HIGH":2, "CRITICAL":3}
+    overall = max((a["level"] for a in alerts), key=lambda x: severity[x]) if alerts else "INFO"
+
+    badge = {
+        "INFO": "🔵 ข้อมูล",
+        "WATCH": "🟡 เฝ้าระวัง",
+        "HIGH": "🟠 ความเสี่ยงสูง",
+        "CRITICAL": "🔴 วิกฤต",
+    }[overall]
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Decision Status", badge)
+    c2.metric("Open Positions", len(pos))
+    c3.metric("Net Exposure", f"{net:+,.2f} lots")
+    c4.metric("Floating P&L", f"{floating:+,.2f}")
+
+    st.divider()
+    st.markdown("### Portfolio Alerts")
+    if not alerts:
+        st.success("ยังไม่พบ Alert จากกฎที่ตั้งไว้")
+    else:
+        for a in alerts:
+            if a["level"] == "CRITICAL":
+                st.error(f"{a['title']} — {a['detail']}\n\nตรวจสอบ: {a['action']}")
+            elif a["level"] == "HIGH":
+                st.warning(f"{a['title']} — {a['detail']}\n\nตรวจสอบ: {a['action']}")
+            elif a["level"] == "WATCH":
+                st.info(f"{a['title']} — {a['detail']}\n\nตรวจสอบ: {a['action']}")
+            else:
+                st.caption(f"🔵 {a['title']} — {a['detail']} · {a['action']}")
+
+    st.divider()
+    st.markdown("### Decision Snapshot")
+    rows = [
+        {"Metric":"Margin Utilization", "Value":f"{margin_util:.1f}%", "Interpretation":"สูงขึ้น = ใช้ Margin มากขึ้น"},
+        {"Metric":"Free Margin Ratio", "Value":f"{free_ratio:.1f}%", "Interpretation":"ต่ำลง = buffer เหลือน้อยลง"},
+        {"Metric":"Floating Loss", "Value":f"{floating_loss_pct:.2f}%", "Interpretation":"วัดขาดทุนลอยตัวเทียบ Equity"},
+        {"Metric":"Directional Imbalance", "Value":f"{directional_pct:.1f}%", "Interpretation":"Net Lots เทียบ Gross Lots"},
+        {"Metric":"Largest Symbol", "Value":f"{concentration_symbol} ({symbol_conc:.1f}%)", "Interpretation":"สัดส่วน Gross Lots สูงสุด"},
+    ]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    st.caption("Decision Engine v1 ใช้กฎจากสถานะพอร์ตปัจจุบันเท่านั้น ไม่ทำนายราคา ไม่จัดอันดับสินทรัพย์ และไม่ส่งคำสั่งซื้อขายอัตโนมัติ")
+
 def page_open(pos: pd.DataFrame) -> None:
     st.subheader("ไม้ที่เปิดอยู่")
     if pos.empty:
@@ -1225,7 +1371,7 @@ def page_journal(df: pd.DataFrame, store: NoteStore, aid: str) -> None:
 # MAIN
 # =========================================================
 
-NAV = ["📊 Dashboard", "📐 Portfolio Exposure", "🛡️ Risk Engine", "🟡 ไม้ที่เปิดอยู่", "📓 Journal", "🔌 เชื่อมต่อบัญชี"]
+NAV = ["📊 Dashboard", "📐 Portfolio Exposure", "🛡️ Risk Engine", "🧠 Decision Engine", "🟡 ไม้ที่เปิดอยู่", "📓 Journal", "🔌 เชื่อมต่อบัญชี"]
 
 
 def main() -> None:
@@ -1272,9 +1418,12 @@ def main() -> None:
             page_risk_engine(fetch_latest_mt5_snapshot())
             return
         if page == NAV[3]:
+            page_decision_engine(fetch_latest_mt5_snapshot())
+            return
+        if page == NAV[4]:
             page_live_monitor(fetch_latest_mt5_snapshot())
             return
-        if page == NAV[5]:
+        if page == NAV[6]:
             st.subheader("🔌 MT5 Collector")
             st.success("Supabase เชื่อมต่อแล้ว — NobodyCollector กำลังส่งข้อมูลจาก MT5", icon="✅")
             st.code("MT5 → NobodyCollector → Supabase → Nobody Trade Journal", language="text")
@@ -1295,7 +1444,7 @@ def main() -> None:
         )
         st.stop()
 
-    if page == NAV[4]:
+    if page == NAV[6]:
         page_connect(token, region)
         return
 
@@ -1356,13 +1505,13 @@ def main() -> None:
             # Exposure page is available only in the free MT5 -> Supabase path.
             st.info("Portfolio Exposure ใช้ข้อมูล MT5 → Supabase; โหมด MetaApi เดิมยังไม่ได้เปิดหน้านี้")
             return
-        if page == NAV[3]:
+        if page == NAV[4]:
             page_open(fetch_positions(token, acc_region, aid))
             return
         with st.spinner("กำลังดึงประวัติเทรด..."):
             trades = fetch_history(token, acc_region, aid, days)
         df = merge_notes(trades, store.load(aid))
-        if page == NAV[3]:
+        if page == NAV[5]:
             page_journal(df, store, aid)
             return
         try:
