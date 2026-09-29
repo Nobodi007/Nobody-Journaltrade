@@ -1479,6 +1479,176 @@ def page_performance_breakdown(snapshot: dict) -> None:
 
     st.caption("Step 2 ยังเป็น descriptive statistics จากข้อมูลจริงเท่านั้น · ยังไม่ทำ AI inference, strategy scoring, prediction หรือ recommendation")
 
+
+def _behavior_analysis(trades: pd.DataFrame) -> dict:
+    """Compute descriptive trading-behavior statistics from completed trades.
+
+    This is deliberately descriptive: it does not infer psychology, diagnose
+    discipline, score strategies, predict outcomes, or recommend actions.
+    """
+    if trades is None or trades.empty:
+        return {}
+
+    w = trades.copy()
+    w["net_result"] = pd.to_numeric(w["net_result"], errors="coerce").fillna(0.0)
+    if "deal_time" in w.columns:
+        w["deal_time"] = pd.to_datetime(w["deal_time"], errors="coerce", utc=True)
+        w = w.sort_values("deal_time", kind="stable").reset_index(drop=True)
+    else:
+        w["deal_time"] = pd.NaT
+
+    valid_times = w["deal_time"].dropna()
+    active_days = int(valid_times.dt.date.nunique()) if not valid_times.empty else 0
+    calendar_span = None
+    if len(valid_times) >= 2:
+        calendar_span = max((valid_times.max() - valid_times.min()).total_seconds() / 86400.0, 0.0)
+
+    gaps_min = w["deal_time"].diff().dt.total_seconds().div(60.0)
+    valid_gaps = gaps_min[(gaps_min.notna()) & (gaps_min >= 0)]
+
+    rapid_15 = int((valid_gaps < 15).sum())
+    rapid_30 = int((valid_gaps < 30).sum())
+    rapid_60 = int((valid_gaps < 60).sum())
+
+    # A factual sequence flag: a trade closed within 30 minutes after a
+    # previous losing trade. This is not labelled as revenge trading.
+    prior_result = w["net_result"].shift(1)
+    after_loss_30 = int(((prior_result < 0) & (gaps_min <= 30) & gaps_min.notna()).sum())
+    after_win_30 = int(((prior_result > 0) & (gaps_min <= 30) & gaps_min.notna()).sum())
+
+    same_symbol_60 = 0
+    if "symbol" in w.columns:
+        prev_symbol = w["symbol"].shift(1).astype(str)
+        same_symbol_60 = int(((prev_symbol == w["symbol"].astype(str)) & (gaps_min <= 60) & gaps_min.notna()).sum())
+
+    # Position-size comparison where volume exists.
+    if "volume" in w.columns:
+        w["volume"] = pd.to_numeric(w["volume"], errors="coerce")
+        win_vol = w.loc[w["net_result"] > 0, "volume"].dropna()
+        loss_vol = w.loc[w["net_result"] < 0, "volume"].dropna()
+        avg_win_volume = float(win_vol.mean()) if len(win_vol) else None
+        avg_loss_volume = float(loss_vol.mean()) if len(loss_vol) else None
+    else:
+        avg_win_volume = avg_loss_volume = None
+
+    # Closed-trade cumulative curve and maximum peak-to-trough drawdown.
+    cumulative = w["net_result"].cumsum()
+    running_peak = cumulative.cummax()
+    drawdown = cumulative - running_peak
+    max_drawdown = float(abs(drawdown.min())) if len(drawdown) else 0.0
+    max_drawdown_idx = int(drawdown.idxmin()) if len(drawdown) else None
+
+    # Count each run of consecutive wins/losses and expose the sequence table.
+    outcomes = w["net_result"].apply(lambda x: "Win" if x > 0 else ("Loss" if x < 0 else "Breakeven"))
+    runs = []
+    current = None
+    start = 0
+    for i, outcome in enumerate(outcomes.tolist()):
+        if outcome != current:
+            if current is not None:
+                runs.append((current, start, i - 1, i - start))
+            current = outcome
+            start = i
+    if current is not None:
+        runs.append((current, start, len(outcomes) - 1, len(outcomes) - start))
+
+    return {
+        "trades": int(len(w)),
+        "active_days": active_days,
+        "calendar_span_days": calendar_span,
+        "trades_per_active_day": (len(w) / active_days) if active_days else None,
+        "median_gap_min": float(valid_gaps.median()) if len(valid_gaps) else None,
+        "mean_gap_min": float(valid_gaps.mean()) if len(valid_gaps) else None,
+        "rapid_15": rapid_15,
+        "rapid_30": rapid_30,
+        "rapid_60": rapid_60,
+        "after_loss_30": after_loss_30,
+        "after_win_30": after_win_30,
+        "same_symbol_60": same_symbol_60,
+        "avg_win_volume": avg_win_volume,
+        "avg_loss_volume": avg_loss_volume,
+        "max_drawdown": max_drawdown,
+        "max_drawdown_idx": max_drawdown_idx,
+        "runs": runs,
+        "ordered": w,
+    }
+
+
+def page_behavior_analysis(snapshot: dict) -> None:
+    """Step 3: descriptive trading-behavior analysis from closed trades."""
+    st.markdown('<div class="nj-section-title">Trading Behavior Analysis</div>', unsafe_allow_html=True)
+    st.caption("Step 3 · วิเคราะห์รูปแบบพฤติกรรมที่สังเกตได้จากลำดับ Trade History · ไม่วินิจฉัยอารมณ์และไม่ให้คะแนน")
+
+    if not snapshot or snapshot.get("_error"):
+        st.warning("ยังไม่พบ Account Snapshot จาก Supabase")
+        return
+
+    history = fetch_mt5_history_supabase(snapshot)
+    trades = _trade_baseline_rows(history)
+    if trades.empty:
+        st.info("ยังไม่มี Closed Trade สำหรับทำ Behavior Analysis")
+        return
+
+    a = _behavior_analysis(trades)
+    ordered = a["ordered"]
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Completed Trades", f"{a['trades']:,}")
+    c2.metric("Active Trading Days", f"{a['active_days']:,}")
+    c3.metric("Trades / Active Day", f"{a['trades_per_active_day']:.2f}" if a["trades_per_active_day"] is not None else "—")
+    c4.metric("Max Closed-Trade Drawdown", f"-{a['max_drawdown']:,.2f}")
+
+    st.markdown("### Trade Frequency")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Median Gap", f"{a['median_gap_min']:.1f} min" if a["median_gap_min"] is not None else "—")
+    c2.metric("Average Gap", f"{a['mean_gap_min']:.1f} min" if a["mean_gap_min"] is not None else "—")
+    c3.metric("Data Span", f"{a['calendar_span_days']:.1f} days" if a["calendar_span_days"] is not None else "—")
+
+    freq_rows = pd.DataFrame([
+        {"Pattern": "Next trade within 15 min", "Count": a["rapid_15"], "Share of gaps": (a["rapid_15"] / max(len(ordered) - 1, 1) * 100)},
+        {"Pattern": "Next trade within 30 min", "Count": a["rapid_30"], "Share of gaps": (a["rapid_30"] / max(len(ordered) - 1, 1) * 100)},
+        {"Pattern": "Next trade within 60 min", "Count": a["rapid_60"], "Share of gaps": (a["rapid_60"] / max(len(ordered) - 1, 1) * 100)},
+        {"Pattern": "Same symbol again within 60 min", "Count": a["same_symbol_60"], "Share of gaps": (a["same_symbol_60"] / max(len(ordered) - 1, 1) * 100)},
+    ])
+    st.dataframe(freq_rows.style.format({"Share of gaps": "{:.1f}%"}), use_container_width=True, hide_index=True)
+
+    st.markdown("### Sequence After Wins / Losses")
+    st.caption("เป็นเพียงลำดับเวลา: นับว่ามี trade ใหม่ภายใน 30 นาทีหลัง trade ก่อนหน้าที่ปิดกำไรหรือขาดทุน ไม่ได้สรุปว่าเป็น revenge trading หรือสาเหตุทางจิตวิทยา")
+    seq = pd.DataFrame([
+        {"Previous Result": "Loss", "Next Trade ≤30 min": a["after_loss_30"]},
+        {"Previous Result": "Win", "Next Trade ≤30 min": a["after_win_30"]},
+    ])
+    st.dataframe(seq, use_container_width=True, hide_index=True)
+
+    st.markdown("### Position Size: Winners vs Losers")
+    size_rows = pd.DataFrame([
+        {"Group": "Winning trades", "Average Volume": a["avg_win_volume"]},
+        {"Group": "Losing trades", "Average Volume": a["avg_loss_volume"]},
+    ])
+    st.dataframe(size_rows.style.format({"Average Volume": lambda x: "—" if pd.isna(x) else f"{x:.4f}"}), use_container_width=True, hide_index=True)
+
+    st.markdown("### Outcome Sequence")
+    runs = a["runs"]
+    if runs:
+        run_rows = []
+        for outcome, start, end, length in runs:
+            run_rows.append({
+                "Outcome": outcome,
+                "Start Trade": start + 1,
+                "End Trade": end + 1,
+                "Length": length,
+                "Net P&L": float(ordered.iloc[start:end + 1]["net_result"].sum()),
+            })
+        run_df = pd.DataFrame(run_rows)
+        st.dataframe(run_df.style.format({"Net P&L": "{:+,.2f}"}), use_container_width=True, hide_index=True)
+
+    st.markdown("### Closed-Trade Equity Curve")
+    curve = ordered[[c for c in ["deal_ticket", "symbol", "deal_time", "net_result"] if c in ordered.columns]].copy()
+    curve["Cumulative P&L"] = ordered["net_result"].cumsum().values
+    st.line_chart(curve["Cumulative P&L"], height=280, use_container_width=True)
+
+    st.caption("Step 3 เป็น descriptive analysis จาก Trade History เท่านั้น · ยังไม่ทำ AI inference, psychology diagnosis, strategy scoring, prediction หรือ auto-trading")
+
 def page_performance_baseline(snapshot: dict) -> None:
     """Step 1: factual trading-performance baseline from MT5 deal history."""
     st.markdown('<div class="nj-section-title">Trading Performance Baseline</div>', unsafe_allow_html=True)
@@ -1682,7 +1852,7 @@ def page_journal(df: pd.DataFrame, store: NoteStore, aid: str) -> None:
 # MAIN
 # =========================================================
 
-NAV = ["📊 Dashboard", "📈 Trading Performance", "📊 Performance Breakdown", "📐 Portfolio Exposure", "🛡️ Risk Engine", "🧠 Decision Engine", "🟡 ไม้ที่เปิดอยู่", "📓 Journal", "🔌 เชื่อมต่อบัญชี"]
+NAV = ["📊 Dashboard", "📈 Trading Performance", "📊 Performance Breakdown", "🧠 Trading Behavior", "📐 Portfolio Exposure", "🛡️ Risk Engine", "🧠 Decision Engine", "🟡 ไม้ที่เปิดอยู่", "📓 Journal", "🔌 เชื่อมต่อบัญชี"]
 
 
 def main() -> None:
