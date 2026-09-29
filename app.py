@@ -1945,9 +1945,9 @@ def fetch_trade_setup_plans(snapshot: dict) -> list[dict]:
 
 
 def render_gold_tradingview_chart() -> None:
-    """Gold-only TradingView Advanced Chart workspace with full dark analysis toolbars."""
+    """Gold-only TradingView Advanced Chart with the full dark analysis UI."""
     st.markdown(
-        '''
+        """
         <div class="gold-workspace-head">
           <div>
             <div class="gold-workspace-title">📈 Gold Trading Workspace</div>
@@ -1955,82 +1955,51 @@ def render_gold_tradingview_chart() -> None:
           </div>
           <div class="gold-workspace-badge">● PEPPERSTONE · XAUUSD</div>
         </div>
-        ''',
+        """,
         unsafe_allow_html=True,
     )
 
-    # Advanced Chart widget: keep the full TradingView analysis UI visible.
-    # hide_side_toolbar=False enables the left drawing toolbar.
+    # Official TradingView Advanced Chart widget settings.
     chart_html = r'''
-    <style>
-      html, body {
-        margin:0; padding:0; background:#0b0d10; overflow:hidden;
-        color:#d7dde7;
-      }
-      .tv-shell {
-        width:100%; height:820px;
-        border:1px solid #242a33; border-radius:14px;
-        overflow:hidden; background:#0b0d10;
-        box-shadow:0 14px 42px rgba(0,0,0,.34);
-      }
-      .tradingview-widget-container { width:100%; height:100%; }
-      .tradingview-widget-container__widget { width:100%; height:calc(100% - 28px); }
-      .tradingview-widget-copyright {
-        height:28px; display:flex; align-items:center; justify-content:center;
-        background:#0b0d10;
-      }
-      .tradingview-widget-copyright a {
-        color:#657184; text-decoration:none; font-size:11px;
-      }
-    </style>
-    <div class="tv-shell">
-      <div class="tradingview-widget-container">
-        <div class="tradingview-widget-container__widget"></div>
-        <div class="tradingview-widget-copyright">
-          <a href="https://www.tradingview.com/symbols/XAUUSD/?exchange=PEPPERSTONE" rel="noopener nofollow" target="_blank">
-            XAUUSD · TradingView
-          </a>
-        </div>
-        <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
+    <div id="tv-gold-workspace" style="width:100%;height:900px;background:#0b0d10;border:1px solid #242a33;border-radius:14px;overflow:hidden;">
+      <div class="tradingview-widget-container" style="width:100%;height:100%;">
+        <div class="tradingview-widget-container__widget" style="width:100%;height:100%;"></div>
+        <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js?v=gold-workspace-v3" async>
         {
           "autosize": true,
           "symbol": "PEPPERSTONE:XAUUSD",
           "interval": "5",
           "timezone": "Asia/Bangkok",
           "theme": "dark",
+          "style": "1",
+          "locale": "en",
           "backgroundColor": "#0b0d10",
           "gridColor": "rgba(70,78,90,0.24)",
-          "style": "1",
-          "locale": "th",
           "allow_symbol_change": false,
           "hide_side_toolbar": false,
           "hide_top_toolbar": false,
           "hide_legend": false,
           "hide_volume": false,
-          "withdateranges": false,
+          "withdateranges": true,
           "calendar": false,
           "details": false,
           "hotlist": false,
           "watchlist": [],
           "compareSymbols": [],
-          "save_image": false,
+          "save_image": true,
           "show_popup_button": false,
           "studies": ["MAExp@tv-basicstudies"],
-          "studies_overrides": {
-            "moving average exponential.length": 200,
-            "moving average exponential.plot.color": "#3b9cff",
-            "moving average exponential.plot.linewidth": 2
-          },
           "support_host": "https://www.tradingview.com"
         }
         </script>
       </div>
     </div>
     '''
-    components.html(chart_html, height=840, scrolling=False)
+
+    components.html(chart_html, height=920, scrolling=False)
 
     st.markdown(
-        '''
+        """
         <div class="gold-workspace-note">
           <span>🧠</span>
           <div>
@@ -2038,10 +2007,9 @@ def render_gold_tradingview_chart() -> None:
             <span>M5 Close → EMA200 → X/IDM → BOS → BOS Swing → FVG → Retrace → Entry</span>
           </div>
         </div>
-        ''',
+        """,
         unsafe_allow_html=True,
     )
-
 
 def fetch_gold_position_price(snapshot: dict) -> float | None:
     """Best-effort MT5 current price from an open GOLD/XAUUSD position."""
