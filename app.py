@@ -1944,10 +1944,40 @@ def fetch_trade_setup_plans(snapshot: dict) -> list[dict]:
         return []
 
 
+@st.cache_data(ttl=5, show_spinner=False)
+def fetch_gold_m5_candles(limit: int = 600) -> list[dict]:
+    """Read XAUUSD M5 candles server-side so the workspace does not depend on CDN JS."""
+    base_url, api_key = get_supabase_config()
+    if not base_url or not api_key:
+        return []
+    headers = {"apikey": api_key, "Authorization": f"Bearer {api_key}", "Accept": "application/json"}
+    params = {
+        "select": "time_unix,open,high,low,close,volume",
+        "symbol": "eq.XAUUSD",
+        "timeframe": "eq.M5",
+        "order": "time_unix.desc",
+        "limit": str(limit),
+    }
+    try:
+        r = requests.get(f"{base_url}/rest/v1/mt5_gold_m5_candles", headers=headers, params=params, timeout=10)
+        r.raise_for_status()
+        rows = r.json()
+        if not isinstance(rows, list):
+            return []
+        out = []
+        for x in reversed(rows):
+            try:
+                out.append({"time": int(x["time_unix"]), "open": float(x["open"]), "high": float(x["high"]), "low": float(x["low"]), "close": float(x["close"]), "volume": float(x.get("volume") or 0)})
+            except Exception:
+                pass
+        return out
+    except Exception:
+        return []
+
+
 def render_gold_tradingview_chart() -> None:
-    """Gold M5 workspace using free TradingView Lightweight Charts + persistent drawings."""
-    st.markdown(
-        """
+    """Free self-contained XAUUSD M5 workspace; no external chart JS dependency."""
+    st.markdown("""
         <div class="gold-workspace-head">
           <div>
             <div class="gold-workspace-title">📈 Gold Trading Workspace · Persistent</div>
@@ -1955,9 +1985,7 @@ def render_gold_tradingview_chart() -> None:
           </div>
           <div class="gold-workspace-badge">● MT5 → Supabase · DRAWINGS SAVED</div>
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        """, unsafe_allow_html=True)
 
     base_url, api_key = get_supabase_config()
     snapshot = fetch_latest_mt5_snapshot()
@@ -1966,18 +1994,14 @@ def render_gold_tradingview_chart() -> None:
     if not base_url or not api_key:
         st.error("ยังไม่มี SUPABASE_URL / SUPABASE_KEY ใน Streamlit Secrets")
         return
-    if not login or not server:
-        st.warning("ยังไม่พบ MT5 account snapshot — กราฟจะรอข้อมูล M5 จาก NobodyCollector")
+
+    candles = fetch_gold_m5_candles(600)
+    if not candles:
+        st.warning("ยังไม่พบ XAUUSD M5 ใน Supabase — ตรวจ Nobody_GoldM5Collector และ table mt5_gold_m5_candles")
 
     workspace_key = f"{login}|{server}|XAUUSD|M5"
-    payload = {
-        "supabaseUrl": base_url,
-        "supabaseKey": api_key,
-        "workspaceKey": workspace_key,
-        "login": login,
-        "server": server,
-    }
-    payload_json = json.dumps(payload).replace("</", "<\\/")
+    payload = {"supabaseUrl": base_url, "supabaseKey": api_key, "workspaceKey": workspace_key, "login": login, "server": server, "candles": candles}
+    payload_json = json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
 
     chart_html = r'''<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1986,88 +2010,50 @@ def render_gold_tradingview_chart() -> None:
 #shell{height:900px;border:1px solid #252c37;border-radius:14px;overflow:hidden;background:#0b0d10;display:flex;flex-direction:column}
 #bar{height:54px;min-height:54px;display:flex;align-items:center;gap:7px;padding:8px 10px;border-bottom:1px solid #242b36;background:#11151c}
 .title{font-weight:800;font-size:14px;margin-right:8px;white-space:nowrap}.muted{color:#8490a2;font-size:11px;margin-left:auto;white-space:nowrap}
-button{border:1px solid #303846;background:#181e27;color:#dbe3ed;border-radius:7px;padding:7px 9px;font-size:11px;cursor:pointer}button:hover{border-color:#65738a;background:#202733}
-button.active{border-color:#6f9cff;background:#243554;color:#fff}.danger{border-color:#69343d}.save{border-color:#285d49}
+button{border:1px solid #303846;background:#181e27;color:#dbe3ed;border-radius:7px;padding:7px 9px;font-size:11px;cursor:pointer}button:hover{border-color:#65738a;background:#202733}.active{border-color:#6f9cff!important;background:#243554!important;color:#fff}.danger{border-color:#69343d}.save{border-color:#285d49}
 #tools{display:flex;gap:5px;align-items:center}.sep{width:1px;height:25px;background:#2a313c;margin:0 3px}.sw{width:20px;height:20px;padding:0;border-radius:50%}.sw[data-c="#78a9ff"]{background:#78a9ff}.sw[data-c="#ff6174"]{background:#ff6174}.sw[data-c="#20d68a"]{background:#20d68a}.sw[data-c="#f2c94c"]{background:#f2c94c}
-#chart{position:relative;flex:1;min-height:0}.empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#697587;font-size:13px;pointer-events:none}
+#chart{position:relative;flex:1;min-height:0;background:#0b0d10}#cv{position:absolute;inset:0;width:100%;height:100%;display:block}.empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#697587;font-size:13px;pointer-events:none}
 #status{height:27px;min-height:27px;border-top:1px solid #242b36;padding:6px 10px;color:#7f8b9d;font-size:10px;background:#10141b}.ok{color:#7ed9ad}.bad{color:#ff8a98}
 </style></head><body>
-<div id="shell"><div id="bar"><div class="title">XAUUSD · M5</div>
-<div id="tools">
-<button data-tool="cursor" class="active">↖ Cursor</button><button data-tool="hline">─ H-Line</button><button data-tool="trend">／ Trendline</button>
-<span class="sep"></span><button class="sw" data-c="#78a9ff" title="Blue"></button><button class="sw" data-c="#ff6174" title="Red"></button><button class="sw" data-c="#20d68a" title="Green"></button><button class="sw" data-c="#f2c94c" title="Yellow"></button>
-<span class="sep"></span><button id="undo">↶ Undo</button><button id="clear" class="danger">Clear</button><button id="save" class="save">Save</button>
-</div><div class="muted">Free · TradingView Lightweight Charts · drawings sync to Supabase</div></div>
-<div id="chart"><div class="empty" id="empty">รอข้อมูล XAUUSD M5 จาก NobodyCollector...</div></div><div id="status">กำลังโหลด...</div></div>
-<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.0/dist/lightweight-charts.standalone.production.min.js"></script>
+<div id="shell"><div id="bar"><div class="title">XAUUSD · M5</div><div id="tools">
+<button data-tool="cursor" class="active">↖ Cursor</button><button data-tool="hline">─ H-Line</button><button data-tool="trend">／ Trendline</button><span class="sep"></span>
+<button class="sw" data-c="#78a9ff"></button><button class="sw" data-c="#ff6174"></button><button class="sw" data-c="#20d68a"></button><button class="sw" data-c="#f2c94c"></button><span class="sep"></span>
+<button id="undo">↶ Undo</button><button id="clear" class="danger">Clear</button><button id="save" class="save">Save</button></div><div class="muted">Free · Canvas · drawings sync to Supabase</div></div>
+<div id="chart"><canvas id="cv"></canvas><div class="empty" id="empty">รอข้อมูล XAUUSD M5 จาก NobodyCollector...</div></div><div id="status">กำลังโหลด...</div></div>
 <script>
-const CFG = __CONFIG__;
-const $=id=>document.getElementById(id); const status=$('status');
+const CFG=__CONFIG__, $=id=>document.getElementById(id), cv=$("cv"), ctx=cv.getContext("2d"), status=$("status");
+let data=Array.isArray(CFG.candles)?CFG.candles:[],drawings=[],history=[],tool="cursor",color="#78a9ff",firstPoint=null,viewStart=0,viewEnd=0,drag=null;
 const key=`nj_gold_drawings_${CFG.workspaceKey}`;
-let drawings=[]; let history=[]; let tool='cursor'; let color='#78a9ff'; let firstPoint=null; let selectedId=null;
-const chart=LightweightCharts.createChart($('chart'),{layout:{background:{type:'solid',color:'#0b0d10'},textColor:'#aeb8c7'},grid:{vertLines:{color:'rgba(70,78,90,.20)'},horzLines:{color:'rgba(70,78,90,.20)'}},rightPriceScale:{borderColor:'#303743'},timeScale:{borderColor:'#303743',timeVisible:true,secondsVisible:false},crosshair:{mode:1}});
-const candles=chart.addSeries(LightweightCharts.CandlestickSeries,{upColor:'#20d68a',downColor:'#ff6174',borderUpColor:'#20d68a',borderDownColor:'#ff6174',wickUpColor:'#20d68a',wickDownColor:'#ff6174'});
-const volume=chart.addSeries(LightweightCharts.HistogramSeries,{priceFormat:{type:'volume'},priceScaleId:'volume',color:'rgba(120,169,255,.35)'});
-chart.priceScale('volume').applyOptions({scaleMargins:{top:.78,bottom:0}});
-const ema=chart.addSeries(LightweightCharts.LineSeries,{color:'#78a9ff',lineWidth:2,priceLineVisible:false,lastValueVisible:false});
-const overlay=document.createElement('canvas'); overlay.style.cssText='position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:4'; $('chart').appendChild(overlay); const ctx=overlay.getContext('2d');
-function resize(){overlay.width=$('chart').clientWidth*devicePixelRatio;overlay.height=$('chart').clientHeight*devicePixelRatio;ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0); chart.resize($('chart').clientWidth,$('chart').clientHeight); drawOverlay()}
-new ResizeObserver(resize).observe($('chart'));
-function fmtStatus(t,ok=true){status.textContent=t;status.className=ok?'ok':'bad'}
-function calcEMA(rows,n=200){let out=[],k=2/(n+1),prev=null;for(const r of rows){prev=prev==null?r.close:r.close*k+prev*(1-k);out.push({time:r.time,value:prev})}return out}
-async function loadCandles(){
- try{
-  const headers={apikey:CFG.supabaseKey,Authorization:`Bearer ${CFG.supabaseKey}`};
-  const base=`${CFG.supabaseUrl}/rest/v1/mt5_gold_m5_candles?select=time_unix,open,high,low,close,volume&symbol=eq.XAUUSD&timeframe=eq.M5&order=time.asc&limit=1200`;
-  let mode='account';
-  let q=`${base}&login=eq.${encodeURIComponent(CFG.login)}&server=eq.${encodeURIComponent(CFG.server)}`;
-  let r=await fetch(q,{headers});
-  if(!r.ok) throw new Error(`HTTP ${r.status}`);
-  let rows=await r.json();
-  // Fallback: if the collector wrote valid XAUUSD/M5 rows but the account/server
-  // metadata differs, still render the candle feed instead of leaving the chart blank.
-  if(!Array.isArray(rows)||rows.length===0){
-    mode='symbol';
-    r=await fetch(base,{headers});
-    if(!r.ok) throw new Error(`HTTP ${r.status}`);
-    rows=await r.json();
-  }
-  const data=rows.map(x=>({time:Number(x.time_unix),open:+x.open,high:+x.high,low:+x.low,close:+x.close,volume:+(x.volume||0)})).filter(x=>Number.isFinite(x.time)&&Number.isFinite(x.close));
-  candles.setData(data.map(({time,open,high,low,close})=>({time,open,high,low,close})));
-  volume.setData(data.map(x=>({time:x.time,value:x.volume,color:x.close>=x.open?'rgba(32,214,138,.28)':'rgba(255,97,116,.28)'})));
-  ema.setData(calcEMA(data));
-  $('empty').style.display=data.length?'none':'flex';
-  chart.timeScale().fitContent();
-  fmtStatus(data.length?`M5 candles: ${data.length.toLocaleString()} · EMA200 · Volume${mode==='symbol'?' · fallback feed':''}`:'ยังไม่มี XAUUSD M5 candle ใน Supabase',!!data.length);
- }catch(e){$('empty').style.display='flex';fmtStatus(`โหลด candle ไม่สำเร็จ: ${e.message}`,false)} }
-function p2xy(p){if(!p)return null;const x=chart.timeScale().timeToCoordinate(p.time);const y=chart.priceScale('right').priceToCoordinate(p.price);return x==null||y==null?null:{x,y}}
-function xy2p(x,y){const t=chart.timeScale().coordinateToTime(x);const pr=chart.priceScale('right').coordinateToPrice(y);return t==null||pr==null?null:{time:Number(t),price:Number(pr)} }
-function drawOverlay(){const w=$('chart').clientWidth,h=$('chart').clientHeight;ctx.clearRect(0,0,w,h);for(const d of drawings){ctx.strokeStyle=d.color;ctx.lineWidth=d.id===selectedId?3:2;ctx.setLineDash(d.type==='hline'?[7,5]:[]);if(d.type==='hline'){const a=p2xy({time:d.time,price:d.price});if(a){ctx.beginPath();ctx.moveTo(0,a.y);ctx.lineTo(w,a.y);ctx.stroke()}}else if(d.type==='trend'){const a=p2xy(d.a),b=p2xy(d.b);if(a&&b){ctx.setLineDash([]);ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke()}}}ctx.setLineDash([])}
-function pushHistory(){history.push(JSON.stringify(drawings));if(history.length>30)history.shift()}
-function addDrawing(d){pushHistory();d.id=crypto.randomUUID();drawings.push(d);selectedId=d.id;drawOverlay();persist()}
-function persistLocal(){localStorage.setItem(key,JSON.stringify(drawings))}
-async function persist(){persistLocal(); try{const url=`${CFG.supabaseUrl}/rest/v1/gold_chart_drawings?on_conflict=workspace_key`;const body={workspace_key:CFG.workspaceKey,login:CFG.login||null,server:CFG.server||null,symbol:'XAUUSD',timeframe:'M5',drawings};const r=await fetch(url,{method:'POST',headers:{apikey:CFG.supabaseKey,Authorization:`Bearer ${CFG.supabaseKey}`,'Content-Type':'application/json',Prefer:'resolution=merge-duplicates,return=minimal'},body:JSON.stringify(body)});if(!r.ok)throw new Error(`HTTP ${r.status}`);fmtStatus(`บันทึกแล้ว · ${new Date().toLocaleTimeString('th-TH')}`,true)}catch(e){fmtStatus(`Supabase save ไม่สำเร็จ · เก็บ local backup แล้ว`,false)}}
-async function restore(){try{const q=`${CFG.supabaseUrl}/rest/v1/gold_chart_drawings?select=drawings&workspace_key=eq.${encodeURIComponent(CFG.workspaceKey)}&limit=1`;const r=await fetch(q,{headers:{apikey:CFG.supabaseKey,Authorization:`Bearer ${CFG.supabaseKey}`}});if(r.ok){const a=await r.json();if(a[0]?.drawings?.length){drawings=a[0].drawings;drawOverlay();fmtStatus(`กู้ drawing จาก Supabase แล้ว · ${drawings.length} รายการ`,true);return}}}catch(e){}try{const raw=localStorage.getItem(key);if(raw){drawings=JSON.parse(raw)||[];drawOverlay();fmtStatus(`กู้ drawing จาก browser backup แล้ว · ${drawings.length} รายการ`,true);return}}catch(e){}fmtStatus('พร้อมใช้งาน · ยังไม่มี drawing ที่บันทึกไว้',true)}
-$('tools').addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.tool){tool=b.dataset.tool;firstPoint=null;document.querySelectorAll('[data-tool]').forEach(x=>x.classList.toggle('active',x===b));return}if(b.dataset.c){color=b.dataset.c;return}if(b.id==='undo'){if(!history.length)return;drawings=JSON.parse(history.pop());selectedId=null;drawOverlay();persist();return}if(b.id==='clear'){if(!drawings.length)return;pushHistory();drawings=[];selectedId=null;drawOverlay();persist();return}if(b.id==='save')persist()});
-$('chart').addEventListener('click',e=>{const r=overlay.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top,p=xy2p(x,y);if(!p)return;if(tool==='hline'){addDrawing({type:'hline',time:p.time,price:p.price,color});return}if(tool==='trend'){if(!firstPoint){firstPoint=p;fmtStatus('Trendline: คลิกจุดที่สอง',true)}else{addDrawing({type:'trend',a:firstPoint,b:p,color});firstPoint=null;fmtStatus('เพิ่ม Trendline แล้ว',true)}}});
-chart.subscribeCrosshairMove(drawOverlay); chart.timeScale().subscribeVisibleTimeRangeChange(drawOverlay); loadCandles().then(restore); window.addEventListener('resize',resize); setInterval(loadCandles,30000);
+function stat(t,ok=true){status.textContent=t;status.className=ok?"ok":"bad"}
+function ema(rows,n=200){let a=[],k=2/(n+1),p=null;for(const r of rows){p=p==null?r.close:r.close*k+p*(1-k);a.push(p)}return a}
+function range(rows){let lo=Infinity,hi=-Infinity;for(const r of rows){lo=Math.min(lo,r.low);hi=Math.max(hi,r.high)}let pad=(hi-lo||1)*.08;return[lo-pad,hi+pad]}
+function xy(i,p,lo,hi,w,h){let n=Math.max(1,viewEnd-viewStart-1);return[((i-viewStart)/n)*w,h-((p-lo)/(hi-lo))*h*.78-18]}
+function resize(){let d=devicePixelRatio||1;cv.width=Math.max(1,cv.clientWidth*d);cv.height=Math.max(1,cv.clientHeight*d);ctx.setTransform(d,0,0,d,0,0);draw()}
+new ResizeObserver(resize).observe(cv);
+function draw(){let w=cv.clientWidth,h=cv.clientHeight;if(!w||!h)return;ctx.clearRect(0,0,w,h);ctx.fillStyle="#0b0d10";ctx.fillRect(0,0,w,h);if(!data.length){$("empty").style.display="flex";return}$("empty").style.display="none";if(!viewEnd){viewEnd=data.length;viewStart=Math.max(0,viewEnd-140)}viewStart=Math.max(0,Math.min(viewStart,data.length-2));viewEnd=Math.max(viewStart+2,Math.min(viewEnd,data.length));let rows=data.slice(viewStart,viewEnd),[lo,hi]=range(rows),cw=w/Math.max(1,rows.length),e=ema(data);ctx.strokeStyle="rgba(70,78,90,.22)";ctx.lineWidth=1;for(let j=0;j<6;j++){let y=18+j*h*.78/5;ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke()}for(let j=0;j<5;j++){let x=j*w/4;ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,h);ctx.stroke()}for(let j=0;j<rows.length;j++){let r=rows[j],i=viewStart+j,[,yh]=xy(i,r.high,lo,hi,w,h),[x,yl]=xy(i,r.low,lo,hi,w,h),[,yc]=xy(i,r.close,lo,hi,w,h),[,yo]=xy(i,r.open,lo,hi,w,h),up=r.close>=r.open;ctx.strokeStyle=up?"#20d68a":"#ff6174";ctx.fillStyle=ctx.strokeStyle;ctx.beginPath();ctx.moveTo(x,yh);ctx.lineTo(x,yl);ctx.stroke();ctx.fillRect(x-cw*.32,Math.min(yc,yo),Math.max(1,cw*.64),Math.max(1,Math.abs(yc-yo)))}ctx.beginPath();ctx.strokeStyle="#78a9ff";ctx.lineWidth=2;let started=false;for(let i=viewStart;i<viewEnd;i++){let[x,y]=xy(i,e[i],lo,hi,w,h);if(!started){ctx.moveTo(x,y);started=true}else ctx.lineTo(x,y)}ctx.stroke();let mv=Math.max(...rows.map(r=>r.volume||0),1);for(let j=0;j<rows.length;j++){let r=rows[j],i=viewStart+j,[x]=xy(i,r.close,lo,hi,w,h),vh=(r.volume/mv)*h*.16;ctx.fillStyle=r.close>=r.open?"rgba(32,214,138,.28)":"rgba(255,97,116,.28)";ctx.fillRect(x-cw*.3,h-vh,Math.max(1,cw*.6),vh)}ctx.font="11px Arial";ctx.fillStyle="#8b95a5";for(let j=0;j<5;j++){let p=hi-j*(hi-lo)/4;ctx.fillText(p.toFixed(2),w-62,22+j*h*.78/4)}drawings.forEach(d=>drawD(d,lo,hi,w,h))}
+function point(x,y){let w=cv.clientWidth,h=cv.clientHeight,rows=data.slice(viewStart,viewEnd);if(!rows.length)return null;let n=Math.max(1,viewEnd-viewStart-1),i=Math.max(viewStart,Math.min(viewEnd-1,Math.round(viewStart+x/w*n))),[lo,hi]=range(rows),p=hi-((y-18)/(h*.78))*(hi-lo);return{time:data[i].time,price:p,i}}
+function ptime(p){let best=viewStart,bd=Infinity;for(let i=viewStart;i<viewEnd;i++){let d=Math.abs(data[i].time-p.time);if(d<bd){bd=d;best=i}}let rows=data.slice(viewStart,viewEnd),[lo,hi]=range(rows),[x,y]=xy(best,p.price,lo,hi,cv.clientWidth,cv.clientHeight);return{x,y}}
+function drawD(d,lo,hi,w,h){ctx.strokeStyle=d.color;ctx.lineWidth=2;ctx.setLineDash(d.type==="hline"?[7,5]:[]);if(d.type==="hline"){let y=h-((d.price-lo)/(hi-lo))*h*.78-18;ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke()}else{let a=ptime(d.a),b=ptime(d.b);ctx.setLineDash([]);ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke()}ctx.setLineDash([])}
+function push(){history.push(JSON.stringify(drawings));if(history.length>30)history.shift()}
+function local(){try{localStorage.setItem(key,JSON.stringify(drawings))}catch(e){}}
+async function persist(){local();try{let u=`${CFG.supabaseUrl}/rest/v1/gold_chart_drawings?on_conflict=workspace_key`,body={workspace_key:CFG.workspaceKey,login:CFG.login||null,server:CFG.server||null,symbol:"XAUUSD",timeframe:"M5",drawings};let r=await fetch(u,{method:"POST",headers:{apikey:CFG.supabaseKey,Authorization:`Bearer ${CFG.supabaseKey}`,"Content-Type":"application/json",Prefer:"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(body)});if(!r.ok)throw Error(r.status);stat(`บันทึกแล้ว · ${new Date().toLocaleTimeString("th-TH")}`)}catch(e){stat("Supabase save ไม่สำเร็จ · เก็บ local backup แล้ว",false)}}
+async function restore(){try{let u=`${CFG.supabaseUrl}/rest/v1/gold_chart_drawings?select=drawings&workspace_key=eq.${encodeURIComponent(CFG.workspaceKey)}&limit=1`,r=await fetch(u,{headers:{apikey:CFG.supabaseKey,Authorization:`Bearer ${CFG.supabaseKey}`}});if(r.ok){let a=await r.json();if(a[0]&&Array.isArray(a[0].drawings)){drawings=a[0].drawings;draw();stat(`กู้ drawing จาก Supabase แล้ว · ${drawings.length} รายการ`);return}}}catch(e){}try{let raw=localStorage.getItem(key);if(raw){drawings=JSON.parse(raw)||[];draw();stat(`กู้ drawing จาก browser backup แล้ว · ${drawings.length} รายการ`);return}}catch(e){}stat(`โหลดแล้ว · M5 candles ${data.length.toLocaleString()} · EMA200 · Volume`)}
+$("tools").addEventListener("click",e=>{let b=e.target.closest("button");if(!b)return;if(b.dataset.tool){tool=b.dataset.tool;firstPoint=null;document.querySelectorAll("[data-tool]").forEach(x=>x.classList.toggle("active",x===b));return}if(b.dataset.c){color=b.dataset.c;return}if(b.id==="undo"){if(!history.length)return;drawings=JSON.parse(history.pop());draw();persist();return}if(b.id==="clear"){if(!drawings.length)return;push();drawings=[];draw();persist();return}if(b.id==="save")persist()});
+cv.addEventListener("click",e=>{if(tool==="cursor")return;let r=cv.getBoundingClientRect(),p=point(e.clientX-r.left,e.clientY-r.top);if(!p)return;if(tool==="hline"){push();drawings.push({id:crypto.randomUUID(),type:"hline",time:p.time,price:p.price,color});draw();persist()}else if(tool==="trend"){if(!firstPoint){firstPoint=p;stat("Trendline: คลิกจุดที่สอง")}else{push();drawings.push({id:crypto.randomUUID(),type:"trend",a:firstPoint,b:p,color});firstPoint=null;draw();persist()}}});
+cv.addEventListener("wheel",e=>{e.preventDefault();let f=e.deltaY<0?.82:1.22,c=viewStart+(e.offsetX/cv.clientWidth)*(viewEnd-viewStart),span=(viewEnd-viewStart)*f;viewStart=Math.max(0,Math.round(c-span*(e.offsetX/cv.clientWidth)));viewEnd=Math.min(data.length,Math.round(viewStart+span));if(viewEnd-viewStart<20){viewEnd=Math.min(data.length,viewStart+20)}draw()},{passive:false});
+cv.addEventListener("mousedown",e=>{if(tool!=="cursor")return;drag={x:e.clientX,start:viewStart,end:viewEnd}});window.addEventListener("mouseup",()=>drag=null);window.addEventListener("mousemove",e=>{if(!drag)return;let dx=e.clientX-drag.x,span=drag.end-drag.start,shift=Math.round(dx/cv.clientWidth*span);viewStart=Math.max(0,drag.start-shift);viewEnd=Math.min(data.length,drag.end-shift);draw()});
+resize();restore();
 </script></body></html>'''
     chart_html = chart_html.replace('__CONFIG__', payload_json)
     components.html(chart_html, height=925, scrolling=False)
 
-    st.markdown(
-        """
+    st.markdown("""
         <div class="gold-workspace-note">
-          <span>🧠</span>
-          <div>
-            <b>Gold Technical Model v1</b>
-            <span>M5 Close → EMA200 → X/IDM → BOS → BOS Swing → FVG → Retrace → Entry</span>
-            <span>Drawing: H-Line / Trendline · สี · Undo · Clear · Auto-save → Supabase</span>
-          </div>
+          <span>🧠</span><div><b>Gold Technical Model v1</b>
+          <span>M5 Close → EMA200 → X/IDM → BOS → BOS Swing → FVG → Retrace → Entry</span>
+          <span>Drawing: H-Line / Trendline · สี · Undo · Clear · Auto-save → Supabase</span></div>
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        """, unsafe_allow_html=True)
 
 def fetch_gold_position_price(snapshot: dict) -> float | None:
     """Best-effort MT5 current price from an open GOLD/XAUUSD position."""
