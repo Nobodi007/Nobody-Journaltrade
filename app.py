@@ -967,6 +967,125 @@ def page_exposure(snapshot: dict) -> None:
         st.info(f"Net Exposure = {net:,.2f} lots → ฝั่ง SELL มากกว่า")
 
 
+
+def _risk_badge(level: str) -> str:
+    colors = {
+        "OK": ("🟢", "ปกติ"),
+        "WATCH": ("🟡", "เฝ้าระวัง"),
+        "HIGH": ("🟠", "ความเสี่ยงสูง"),
+        "CRITICAL": ("🔴", "วิกฤต"),
+    }
+    icon, label = colors.get(level, ("⚪", level))
+    return f"{icon} {label}"
+
+
+def _risk_level(value: float, watch: float, high: float, critical: float, higher_is_worse: bool = True) -> str:
+    if higher_is_worse:
+        if value >= critical:
+            return "CRITICAL"
+        if value >= high:
+            return "HIGH"
+        if value >= watch:
+            return "WATCH"
+        return "OK"
+    if value <= critical:
+        return "CRITICAL"
+    if value <= high:
+        return "HIGH"
+    if value <= watch:
+        return "WATCH"
+    return "OK"
+
+
+def page_risk_engine(snapshot: dict) -> None:
+    """Rule-based portfolio risk monitor using the existing MT5 -> Supabase feed."""
+    st.markdown('<div class="nj-section-title">Risk Engine</div>', unsafe_allow_html=True)
+    st.caption("Rule-based risk monitor · อ่านอย่างเดียว · ไม่ส่งคำสั่งซื้อขาย")
+
+    if not snapshot:
+        st.warning("ยังไม่พบ Account Snapshot จาก Supabase")
+        return
+    if snapshot.get("_error"):
+        st.error(f"อ่าน MT5 จาก Supabase ไม่สำเร็จ: {snapshot['_error']}")
+        return
+
+    pos = fetch_mt5_positions_supabase(snapshot)
+    pending = fetch_mt5_pending_supabase(snapshot)
+
+    balance = _num(snapshot.get("balance"))
+    equity = _num(snapshot.get("equity"))
+    margin = _num(snapshot.get("margin"))
+    free_margin = _num(snapshot.get("free_margin"))
+    floating = equity - balance
+
+    work = pos.copy()
+    if not work.empty:
+        for col in ["volume", "profit", "swap", "commission"]:
+            work[col] = pd.to_numeric(work.get(col), errors="coerce").fillna(0.0) if col in work.columns else 0.0
+        side = work.get("side", pd.Series(index=work.index, dtype=str)).astype(str).str.upper()
+        work["buy_lots"] = work["volume"].where(side.str.contains("BUY", na=False), 0.0)
+        work["sell_lots"] = work["volume"].where(side.str.contains("SELL", na=False), 0.0)
+    else:
+        work = pd.DataFrame(columns=["volume", "profit", "swap", "commission", "buy_lots", "sell_lots", "symbol"])
+
+    gross = float(work["volume"].sum()) if not work.empty else 0.0
+    buy = float(work["buy_lots"].sum()) if not work.empty else 0.0
+    sell = float(work["sell_lots"].sum()) if not work.empty else 0.0
+    net = buy - sell
+    margin_util = (margin / equity * 100.0) if equity > 0 else 0.0
+    free_ratio = (free_margin / equity * 100.0) if equity > 0 else 0.0
+    floating_loss_pct = (max(0.0, -floating) / equity * 100.0) if equity > 0 else 0.0
+    directional_pct = (abs(net) / gross * 100.0) if gross > 0 else 0.0
+
+    if not work.empty and "symbol" in work.columns and gross > 0:
+        concentration = (work.groupby("symbol")["volume"].sum() / gross * 100.0).max()
+        concentration_symbol = str((work.groupby("symbol")["volume"].sum()).idxmax())
+    else:
+        concentration = 0.0
+        concentration_symbol = "-"
+
+    checks = [
+        ("Margin Utilization", margin_util, "%", _risk_level(margin_util, 40, 60, 80), "สูงเกินไปเมื่อ Margin กิน Equity มาก"),
+        ("Free Margin Ratio", free_ratio, "%", _risk_level(free_ratio, 40, 20, 10, higher_is_worse=False), "ต่ำลงแปลว่า buffer เหลือน้อย"),
+        ("Floating Loss", floating_loss_pct, "%", _risk_level(floating_loss_pct, 2, 5, 10), "วัดจาก Equity ปัจจุบัน"),
+        ("Directional Imbalance", directional_pct, "%", _risk_level(directional_pct, 60, 80, 95), "สัดส่วน Net Lots ต่อ Gross Lots"),
+        ("Largest Symbol", concentration, "%", _risk_level(concentration, 60, 80, 95), f"Symbol หลัก: {concentration_symbol}"),
+    ]
+
+    severity = {"OK": 0, "WATCH": 1, "HIGH": 2, "CRITICAL": 3}
+    overall = max((x[3] for x in checks), key=lambda x: severity[x]) if checks else "OK"
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Risk Status", _risk_badge(overall))
+    c2.metric("Margin Utilization", f"{margin_util:.1f}%")
+    c3.metric("Free Margin Ratio", f"{free_ratio:.1f}%")
+    c4.metric("Floating Loss", f"{floating_loss_pct:.2f}%")
+
+    st.divider()
+    st.markdown("### Risk Checks")
+    rows = []
+    for name, value, unit, level, note in checks:
+        rows.append({"Check": name, "Value": f"{value:.2f}{unit}", "Status": _risk_badge(level), "หมายเหตุ": note})
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    st.divider()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Open Positions", f"{len(pos)}")
+    c2.metric("Gross Lots", f"{gross:,.2f}")
+    c3.metric("Net Lots", f"{net:+,.2f}")
+    c4.metric("Pending Orders", f"{len(pending)}")
+
+    if overall == "CRITICAL":
+        st.error("มี Risk Check ระดับวิกฤต — ตรวจสอบ Margin / Exposure / Floating Loss ก่อนดำเนินการต่อ")
+    elif overall == "HIGH":
+        st.warning("มี Risk Check ระดับความเสี่ยงสูง — ควรตรวจสอบรายการที่ถูกทำเครื่องหมาย")
+    elif overall == "WATCH":
+        st.info("มีบางตัวชี้วัดเข้าสู่โซนเฝ้าระวัง")
+    else:
+        st.success("Risk checks ทั้งหมดอยู่ในโซนปกติตามกฎที่ตั้งไว้")
+
+    st.caption("เกณฑ์ในหน้านี้เป็นกฎ monitoring แบบตายตัวของแอป ไม่ใช่การคาดการณ์ตลาด และยังไม่มีการส่งคำสั่งอัตโนมัติ")
+
 def page_open(pos: pd.DataFrame) -> None:
     st.subheader("ไม้ที่เปิดอยู่")
     if pos.empty:
@@ -1106,7 +1225,7 @@ def page_journal(df: pd.DataFrame, store: NoteStore, aid: str) -> None:
 # MAIN
 # =========================================================
 
-NAV = ["📊 Dashboard", "📐 Portfolio Exposure", "🟡 ไม้ที่เปิดอยู่", "📓 Journal", "🔌 เชื่อมต่อบัญชี"]
+NAV = ["📊 Dashboard", "📐 Portfolio Exposure", "🛡️ Risk Engine", "🟡 ไม้ที่เปิดอยู่", "📓 Journal", "🔌 เชื่อมต่อบัญชี"]
 
 
 def main() -> None:
@@ -1150,9 +1269,12 @@ def main() -> None:
             page_exposure(fetch_latest_mt5_snapshot())
             return
         if page == NAV[2]:
+            page_risk_engine(fetch_latest_mt5_snapshot())
+            return
+        if page == NAV[3]:
             page_live_monitor(fetch_latest_mt5_snapshot())
             return
-        if page == NAV[4]:
+        if page == NAV[5]:
             st.subheader("🔌 MT5 Collector")
             st.success("Supabase เชื่อมต่อแล้ว — NobodyCollector กำลังส่งข้อมูลจาก MT5", icon="✅")
             st.code("MT5 → NobodyCollector → Supabase → Nobody Trade Journal", language="text")
@@ -1234,7 +1356,7 @@ def main() -> None:
             # Exposure page is available only in the free MT5 -> Supabase path.
             st.info("Portfolio Exposure ใช้ข้อมูล MT5 → Supabase; โหมด MetaApi เดิมยังไม่ได้เปิดหน้านี้")
             return
-        if page == NAV[2]:
+        if page == NAV[3]:
             page_open(fetch_positions(token, acc_region, aid))
             return
         with st.spinner("กำลังดึงประวัติเทรด..."):
