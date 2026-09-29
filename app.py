@@ -14,6 +14,7 @@ import uuid
 import requests
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from core.analytics import (
     by_group,
@@ -1916,6 +1917,72 @@ def fetch_trade_setup_plans(snapshot: dict) -> list[dict]:
         return []
 
 
+def render_gold_tradingview_chart() -> None:
+    """Gold-only TradingView Advanced Chart workspace."""
+    st.markdown("### 📈 Gold Trading Workspace")
+    st.caption("PEPPERSTONE:XAUUSD · M5 · ใช้สำหรับวิเคราะห์กราฟเท่านั้น · ราคา/บัญชีจริงยังมาจาก MT5 → Supabase")
+
+    chart_html = r'''
+    <div class="tradingview-widget-container" style="height:700px;width:100%;">
+      <div class="tradingview-widget-container__widget" style="height:calc(100% - 32px);width:100%;"></div>
+      <div class="tradingview-widget-copyright" style="font-size:11px;">
+        <a href="https://www.tradingview.com/symbols/XAUUSD/?exchange=PEPPERSTONE" rel="noopener nofollow" target="_blank">
+          XAUUSD chart by TradingView
+        </a>
+      </div>
+      <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
+      {
+        "autosize": true,
+        "symbol": "PEPPERSTONE:XAUUSD",
+        "interval": "5",
+        "timezone": "Asia/Bangkok",
+        "theme": "dark",
+        "style": "1",
+        "locale": "th",
+        "allow_symbol_change": false,
+        "calendar": false,
+        "details": false,
+        "hide_side_toolbar": false,
+        "hide_top_toolbar": false,
+        "hide_legend": false,
+        "hide_volume": true,
+        "hotlist": false,
+        "withdateranges": true,
+        "save_image": false,
+        "show_popup_button": false,
+        "studies": ["MAExp@tv-basicstudies"],
+        "studies_overrides": {
+          "moving average exponential.length": 200
+        },
+        "support_host": "https://www.tradingview.com"
+      }
+      </script>
+    </div>
+    '''
+    components.html(chart_html, height=720, scrolling=False)
+
+
+def fetch_gold_position_price(snapshot: dict) -> float | None:
+    """Best-effort MT5 current price from an open GOLD/XAUUSD position."""
+    try:
+        df = fetch_mt5_positions_supabase(snapshot)
+        if df.empty:
+            return None
+        work = df.copy()
+        if "symbol" not in work.columns or "price_current" not in work.columns:
+            return None
+        work["_gold"] = work["symbol"].astype(str).str.upper().isin(GOLD_SYMBOLS)
+        work = work[work["_gold"]]
+        if work.empty:
+            return None
+        vals = pd.to_numeric(work["price_current"], errors="coerce").dropna()
+        if vals.empty:
+            return None
+        return float(vals.iloc[0])
+    except Exception:
+        return None
+
+
 def page_new_trade_setup(snapshot: dict) -> None:
     """Gold-only M5 pre-trade plan. Plan can be created, then explicitly locked."""
     st.markdown('<div class="nj-section-title">📝 New Trade Setup</div>', unsafe_allow_html=True)
@@ -1926,6 +1993,18 @@ def page_new_trade_setup(snapshot: dict) -> None:
         return
 
     st.warning("🔒 Technical Model นี้ใช้ได้เฉพาะ GOLD / XAUUSD และ M5 เท่านั้น — สินทรัพย์อื่นไม่อนุญาต")
+
+    render_gold_tradingview_chart()
+
+    st.markdown("### 🎯 MT5 Price Helper")
+    current_gold_price = fetch_gold_position_price(snapshot)
+    if current_gold_price is not None:
+        st.caption(f"ราคาทองล่าสุดที่อ่านได้จาก mt5_positions: {current_gold_price:,.2f}")
+        if st.button("📍 ใช้ราคา MT5 เป็น Planned Entry", key="use_mt5_gold_price", use_container_width=False):
+            st.session_state["gold_entry_price_prefill"] = current_gold_price
+            st.rerun()
+    else:
+        st.info("ยังไม่มี Open GOLD/XAUUSD position ใน mt5_positions จึงยังไม่มี current price จาก MT5 ให้ดึงมาใส่ Entry — กราฟ TradingView ใช้วิเคราะห์ได้ตามปกติ")
 
     plans = fetch_trade_setup_plans(snapshot)
     if plans:
@@ -1985,7 +2064,14 @@ def page_new_trade_setup(snapshot: dict) -> None:
 
         st.markdown("#### 3. Trade Plan")
         c1, c2, c3 = st.columns(3)
-        entry = c1.number_input("Planned Entry", min_value=0.0, value=0.0, step=1.0, format="%.2f")
+        entry = c1.number_input(
+            "Planned Entry",
+            min_value=0.0,
+            value=float(st.session_state.get("gold_entry_price_prefill") or 0.0),
+            step=1.0,
+            format="%.2f",
+            key="gold_entry_price",
+        )
         sl = c2.number_input("Stop Loss", min_value=0.0, value=0.0, step=1.0, format="%.2f")
         tp = c3.number_input("Take Profit", min_value=0.0, value=0.0, step=1.0, format="%.2f")
         rr = _planned_rr(direction, entry, sl, tp)
