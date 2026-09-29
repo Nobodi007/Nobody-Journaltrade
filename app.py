@@ -2027,7 +2027,7 @@ def render_gold_tradingview_chart() -> None:
     </div>
     '''
 
-    components.html(chart_html, height=580, scrolling=False)
+    components.html(chart_html, height=560, scrolling=False)
 
     st.markdown(
         """
