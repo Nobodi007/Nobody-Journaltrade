@@ -2271,6 +2271,106 @@ Wick ผ่าน EMA200 อย่างเดียว = ไม่ยืนย�
 
 
 
+def page_gold_journal(snapshot: dict) -> None:
+    """Gold-only journal and execution analysis from factual MT5/Supabase data."""
+    st.markdown('<div class="nj-section-title">🥇 Gold Journal</div>', unsafe_allow_html=True)
+    st.caption("XAUUSD / GOLD · Closed Trade Performance + Plan Compliance · ใช้ข้อมูลที่ Collector เก็บจริง")
+
+    if not snapshot or snapshot.get("_error"):
+        st.warning("ยังไม่พบ Account Snapshot จาก Supabase")
+        return
+
+    history = fetch_mt5_history_supabase(snapshot)
+    gold_history = history.copy() if history is not None else pd.DataFrame()
+    if gold_history.empty:
+        st.info("ยังไม่มี Trade History ของ GOLD/XAUUSD")
+        return
+
+    if "symbol" in gold_history.columns:
+        gold_history = gold_history[gold_history["symbol"].astype(str).str.upper().isin(GOLD_SYMBOLS)].copy()
+    if gold_history.empty:
+        st.info("ยังไม่มี Trade History ของ GOLD/XAUUSD")
+        return
+
+    trades = _trade_baseline_rows(gold_history)
+    if trades.empty:
+        st.info("ยังไม่มี Closed GOLD/XAUUSD Trade ที่ใช้คำนวณ Performance")
+        return
+
+    results = pd.to_numeric(trades["net_result"], errors="coerce").fillna(0.0)
+    wins = results[results > 0]
+    losses = results[results < 0]
+    gross_profit = float(wins.sum())
+    gross_loss_abs = float(abs(losses.sum()))
+    net_pnl = float(results.sum())
+    total = int(len(results))
+    win_rate = float(len(wins) / total * 100) if total else 0.0
+    pf = gross_profit / gross_loss_abs if gross_loss_abs > 0 else None
+    expectancy = float(results.mean()) if total else 0.0
+    ws, ls = _streaks(results.tolist())
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Gold Trades", f"{total:,}")
+    c2.metric("Win Rate", f"{win_rate:.2f}%")
+    c3.metric("Profit Factor", f"{pf:.2f}" if pf is not None else "—")
+    c4.metric("Net P&L", f"{net_pnl:+,.2f}")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Average Win", f"{float(wins.mean()):+,.2f}" if len(wins) else "—")
+    c2.metric("Average Loss", f"{float(losses.mean()):+,.2f}" if len(losses) else "—")
+    c3.metric("Expectancy / Trade", f"{expectancy:+,.2f}")
+    c4.metric("W / L Streak", f"{ws} / {ls}")
+
+    st.markdown("### 📊 ผลตาม Direction")
+    direction_df = _performance_breakdown_rows(gold_history)
+    if not direction_df.empty and "trade_direction" in direction_df.columns:
+        by_direction = _breakdown_table(direction_df, "trade_direction", "Direction")
+        if not by_direction.empty:
+            st.dataframe(by_direction, use_container_width=True, hide_index=True)
+    else:
+        st.info("ยังระบุ Direction จาก Entry deal ไม่ได้")
+
+    st.markdown("### 🛡️ Plan Compliance")
+    compliance_rows = _fetch_compliance_rows(snapshot)
+    gold_compliance = [
+        r for r in compliance_rows
+        if _gold_symbol_allowed(r.get("symbol"))
+    ]
+    if gold_compliance:
+        c1, c2, c3, c4 = st.columns(4)
+        statuses = pd.Series([str(r.get("compliance_status") or "PENDING").upper() for r in gold_compliance])
+        lifecycle = pd.Series([str(r.get("lifecycle_status") or "PENDING").upper() for r in gold_compliance])
+        c1.metric("Matched Plans", len(gold_compliance))
+        c2.metric("🟢 Compliant", int((statuses == "COMPLIANT").sum()))
+        c3.metric("🟡 Deviation", int((statuses == "DEVIATION").sum()))
+        c4.metric("Closed Matched", int((lifecycle == "CLOSED").sum()))
+
+        view = pd.DataFrame(gold_compliance)
+        preferred = [
+            "setup_id", "deal_ticket", "position_id", "planned_direction", "actual_direction",
+            "planned_entry", "actual_entry", "planned_rr", "realized_r",
+            "compliance_status", "lifecycle_status", "trade_profit", "deviation_reason",
+            "exit_price", "exit_time", "evaluated_at",
+        ]
+        cols = [c for c in preferred if c in view.columns]
+        if cols:
+            st.dataframe(view[cols], use_container_width=True, hide_index=True)
+    else:
+        st.info("ยังไม่มี Gold Trade ที่จับคู่กับ Locked Plan — ไม่ถือว่าเป็นความผิดพลาดของ Trade History")
+
+    st.markdown("### 📋 Gold Closed Trades")
+    view_cols = [
+        c for c in [
+            "deal_ticket", "order_ticket", "position_id", "symbol", "trade_direction",
+            "deal_type", "entry_type", "volume", "price", "net_result", "deal_time"
+        ] if c in trades.columns
+    ]
+    if view_cols:
+        st.dataframe(trades[view_cols].sort_values("deal_time", ascending=False).head(100), use_container_width=True, hide_index=True)
+
+    st.caption("หมายเหตุ: Performance นี้เป็นผลจริงจาก MT5 Trade History ของ Gold เท่านั้น; ยังไม่อนุมานเหตุผลของกำไร/ขาดทุน และ Realized R จะมีเฉพาะ Trade ที่จับคู่กับ Locked Plan และมีข้อมูล Exit/SL เพียงพอ")
+
+
 def page_performance_baseline(snapshot: dict) -> None:
     """Step 1: factual trading-performance baseline from MT5 deal history."""
     st.markdown('<div class="nj-section-title">Trading Performance Baseline</div>', unsafe_allow_html=True)
@@ -2474,7 +2574,7 @@ def page_journal(df: pd.DataFrame, store: NoteStore, aid: str) -> None:
 # MAIN
 # =========================================================
 
-NAV = ["📊 Dashboard", "📝 New Trade Setup", "🛡️ Setup Compliance", "📈 Trading Performance", "📊 Performance Breakdown", "🧠 Trading Behavior", "🧬 Trading DNA", "📐 Portfolio Exposure", "🛡️ Risk Engine", "🧠 Decision Engine", "🟡 ไม้ที่เปิดอยู่", "📓 Journal", "🔌 เชื่อมต่อบัญชี"]
+NAV = ["📊 Dashboard", "📝 New Trade Setup", "🛡️ Setup Compliance", "🥇 Gold Journal", "📈 Trading Performance", "📊 Performance Breakdown", "🧠 Trading Behavior", "🧬 Trading DNA", "📐 Portfolio Exposure", "🛡️ Risk Engine", "🧠 Decision Engine", "🟡 ไม้ที่เปิดอยู่", "📓 Journal", "🔌 เชื่อมต่อบัญชี"]
 
 
 # =========================================================
@@ -3009,6 +3109,9 @@ def main() -> None:
             return
         if page == "🛡️ Setup Compliance":
             page_setup_compliance(fetch_latest_mt5_snapshot())
+            return
+        if page == "🥇 Gold Journal":
+            page_gold_journal(fetch_latest_mt5_snapshot())
             return
         if page == "📈 Trading Performance":
             page_performance_baseline(fetch_latest_mt5_snapshot())
