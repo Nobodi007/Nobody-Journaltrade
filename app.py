@@ -1962,25 +1962,32 @@ def page_new_trade_setup(snapshot: dict) -> None:
             ["Trend Change Confirmed", "Trend Change Candidate", "Existing Trend"],
             index=0,
         )
-        ema200_break_price = c2.number_input("EMA200 Break — ราคาปิด M5", min_value=0.0, value=0.0, format="%.5f")
+        ema200_break_price = c2.number_input(
+            "EMA200 Break — ราคาปิด M5",
+            min_value=0.0,
+            value=0.0,
+            step=1.0,
+            format="%.2f",
+            help="ราคาทองใช้ทศนิยม 2 ตำแหน่ง และปุ่ม +/- ขยับทีละ 1.00"
+        )
         st.caption("Candidate = ราคาปิดข้าม EMA200 แล้ว แต่ยังไม่ยืนยัน · Confirmed = มี X/IDM + Valid BOS ครบแล้ว")
 
         st.markdown("#### 2. Structure")
         c1, c2, c3 = st.columns(3)
-        x_price = c1.number_input("X / IDM Price", min_value=0.0, value=0.0, format="%.5f")
-        bos_price = c2.number_input("BOS Price", min_value=0.0, value=0.0, format="%.5f")
-        bos_swing_high = c3.number_input("BOS Swing High", min_value=0.0, value=0.0, format="%.5f")
+        x_price = c1.number_input("X / IDM Price", min_value=0.0, value=0.0, step=1.0, format="%.2f")
+        bos_price = c2.number_input("BOS Price", min_value=0.0, value=0.0, step=1.0, format="%.2f")
+        bos_swing_high = c3.number_input("BOS Swing High", min_value=0.0, value=0.0, step=1.0, format="%.2f")
         c1, c2, c3 = st.columns(3)
-        bos_swing_low = c1.number_input("BOS Swing Low", min_value=0.0, value=0.0, format="%.5f")
-        fvg_high = c2.number_input("FVG High", min_value=0.0, value=0.0, format="%.5f")
-        fvg_low = c3.number_input("FVG Low", min_value=0.0, value=0.0, format="%.5f")
+        bos_swing_low = c1.number_input("BOS Swing Low", min_value=0.0, value=0.0, step=1.0, format="%.2f")
+        fvg_high = c2.number_input("FVG High", min_value=0.0, value=0.0, step=1.0, format="%.2f")
+        fvg_low = c3.number_input("FVG Low", min_value=0.0, value=0.0, step=1.0, format="%.2f")
         st.caption("กฎ: X/IDM → BOS และ FVG ต้องอยู่ภายใน BOS Swing")
 
         st.markdown("#### 3. Trade Plan")
         c1, c2, c3 = st.columns(3)
-        entry = c1.number_input("Planned Entry", min_value=0.0, value=0.0, format="%.5f")
-        sl = c2.number_input("Stop Loss", min_value=0.0, value=0.0, format="%.5f")
-        tp = c3.number_input("Take Profit", min_value=0.0, value=0.0, format="%.5f")
+        entry = c1.number_input("Planned Entry", min_value=0.0, value=0.0, step=1.0, format="%.2f")
+        sl = c2.number_input("Stop Loss", min_value=0.0, value=0.0, step=1.0, format="%.2f")
+        tp = c3.number_input("Take Profit", min_value=0.0, value=0.0, step=1.0, format="%.2f")
         rr = _planned_rr(direction, entry, sl, tp)
         st.metric("Planned RR", f"1 : {rr:.2f}" if rr is not None else "—")
 
