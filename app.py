@@ -1999,17 +1999,17 @@ button.active{border-color:#6f9cff;background:#243554;color:#fff}.danger{border-
 <span class="sep"></span><button id="undo">↶ Undo</button><button id="clear" class="danger">Clear</button><button id="save" class="save">Save</button>
 </div><div class="muted">Free · TradingView Lightweight Charts · drawings sync to Supabase</div></div>
 <div id="chart"><div class="empty" id="empty">รอข้อมูล XAUUSD M5 จาก NobodyCollector...</div></div><div id="status">กำลังโหลด...</div></div>
-<script src="https://unpkg.com/lightweight-charts@5.0.0/dist/lightweight-charts.standalone.production.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@5.0.0/dist/lightweight-charts.standalone.production.min.js"></script>
 <script>
 const CFG = __CONFIG__;
 const $=id=>document.getElementById(id); const status=$('status');
 const key=`nj_gold_drawings_${CFG.workspaceKey}`;
 let drawings=[]; let history=[]; let tool='cursor'; let color='#78a9ff'; let firstPoint=null; let selectedId=null;
-const chart=LWC.createChart($('chart'),{layout:{background:{type:'solid',color:'#0b0d10'},textColor:'#aeb8c7'},grid:{vertLines:{color:'rgba(70,78,90,.20)'},horzLines:{color:'rgba(70,78,90,.20)'}},rightPriceScale:{borderColor:'#303743'},timeScale:{borderColor:'#303743',timeVisible:true,secondsVisible:false},crosshair:{mode:1}});
-const candles=chart.addSeries(LWC.CandlestickSeries,{upColor:'#20d68a',downColor:'#ff6174',borderUpColor:'#20d68a',borderDownColor:'#ff6174',wickUpColor:'#20d68a',wickDownColor:'#ff6174'});
-const volume=chart.addSeries(LWC.HistogramSeries,{priceFormat:{type:'volume'},priceScaleId:'volume',color:'rgba(120,169,255,.35)'});
+const chart=LightweightCharts.createChart($('chart'),{layout:{background:{type:'solid',color:'#0b0d10'},textColor:'#aeb8c7'},grid:{vertLines:{color:'rgba(70,78,90,.20)'},horzLines:{color:'rgba(70,78,90,.20)'}},rightPriceScale:{borderColor:'#303743'},timeScale:{borderColor:'#303743',timeVisible:true,secondsVisible:false},crosshair:{mode:1}});
+const candles=chart.addSeries(LightweightCharts.CandlestickSeries,{upColor:'#20d68a',downColor:'#ff6174',borderUpColor:'#20d68a',borderDownColor:'#ff6174',wickUpColor:'#20d68a',wickDownColor:'#ff6174'});
+const volume=chart.addSeries(LightweightCharts.HistogramSeries,{priceFormat:{type:'volume'},priceScaleId:'volume',color:'rgba(120,169,255,.35)'});
 chart.priceScale('volume').applyOptions({scaleMargins:{top:.78,bottom:0}});
-const ema=chart.addSeries(LWC.LineSeries,{color:'#78a9ff',lineWidth:2,priceLineVisible:false,lastValueVisible:false});
+const ema=chart.addSeries(LightweightCharts.LineSeries,{color:'#78a9ff',lineWidth:2,priceLineVisible:false,lastValueVisible:false});
 const overlay=document.createElement('canvas'); overlay.style.cssText='position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:4'; $('chart').appendChild(overlay); const ctx=overlay.getContext('2d');
 function resize(){overlay.width=$('chart').clientWidth*devicePixelRatio;overlay.height=$('chart').clientHeight*devicePixelRatio;ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0); chart.resize($('chart').clientWidth,$('chart').clientHeight); drawOverlay()}
 new ResizeObserver(resize).observe($('chart'));
