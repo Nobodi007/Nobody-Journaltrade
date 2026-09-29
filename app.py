@@ -1232,6 +1232,113 @@ def page_decision_engine(snapshot: dict) -> None:
 
     st.caption("Decision Engine v1 ใช้กฎจากสถานะพอร์ตปัจจุบันเท่านั้น ไม่ทำนายราคา ไม่จัดอันดับสินทรัพย์ และไม่ส่งคำสั่งซื้อขายอัตโนมัติ")
 
+
+def _trade_baseline_rows(history: pd.DataFrame) -> pd.DataFrame:
+    """Normalize Supabase deal history for Performance Baseline.
+
+    Only OUT/close deals are counted as completed trades when entry_type is
+    available. This avoids counting the IN leg as a winning/losing trade.
+    """
+    if history is None or history.empty:
+        return pd.DataFrame()
+    w = history.copy()
+    for c in ("profit", "commission", "swap", "fee", "volume", "price"):
+        if c in w.columns:
+            w[c] = pd.to_numeric(w[c], errors="coerce").fillna(0.0)
+    if "deal_time" in w.columns:
+        w["deal_time"] = pd.to_datetime(w["deal_time"], errors="coerce", utc=True)
+
+    if "entry_type" in w.columns:
+        et = w["entry_type"].astype(str).str.upper()
+        out = w[et.isin(["OUT", "OUT_BY", "CLOSE", "CLOSED"])].copy()
+        if out.empty:
+            out = w.copy()
+    else:
+        out = w.copy()
+
+    for c in ("profit", "commission", "swap", "fee"):
+        if c not in out.columns:
+            out[c] = 0.0
+    out["net_result"] = out["profit"] + out["commission"] + out["swap"] + out["fee"]
+    return out
+
+
+def _streaks(results: list[float]) -> tuple[int, int]:
+    best_w = best_l = cur_w = cur_l = 0
+    for x in results:
+        if x > 0:
+            cur_w += 1; cur_l = 0; best_w = max(best_w, cur_w)
+        elif x < 0:
+            cur_l += 1; cur_w = 0; best_l = max(best_l, cur_l)
+        else:
+            cur_w = cur_l = 0
+    return best_w, best_l
+
+
+def page_performance_baseline(snapshot: dict) -> None:
+    """Step 1: factual trading-performance baseline from MT5 deal history."""
+    st.markdown('<div class="nj-section-title">Trading Performance Baseline</div>', unsafe_allow_html=True)
+    st.caption("Step 1 · สถิติพื้นฐานจาก Trade History ของ MT5 → Supabase · ยังไม่ทำ Behavior/Quant inference")
+
+    if not snapshot or snapshot.get("_error"):
+        st.warning("ยังไม่พบ Account Snapshot จาก Supabase")
+        return
+
+    history = fetch_mt5_history_supabase(snapshot)
+    trades = _trade_baseline_rows(history)
+    if trades.empty:
+        st.info("ยังไม่มี Closed Trade ที่ใช้คำนวณ Performance Baseline")
+        return
+
+    results = trades["net_result"].astype(float)
+    wins = results[results > 0]
+    losses = results[results < 0]
+    breakeven = int((results == 0).sum())
+    total = len(results)
+    gross_profit = float(wins.sum())
+    gross_loss_abs = float(abs(losses.sum()))
+    net_pnl = float(results.sum())
+    win_rate = float(len(wins) / total * 100) if total else 0.0
+    loss_rate = float(len(losses) / total * 100) if total else 0.0
+    pf = gross_profit / gross_loss_abs if gross_loss_abs > 0 else None
+    avg_win = float(wins.mean()) if len(wins) else 0.0
+    avg_loss = float(losses.mean()) if len(losses) else 0.0
+    expectancy = float(results.mean()) if total else 0.0
+    ws, ls = _streaks(results.tolist())
+
+    c1,c2,c3,c4 = st.columns(4)
+    c1.metric("Total Trades", f"{total:,}")
+    c2.metric("Win Rate", f"{win_rate:.2f}%")
+    c3.metric("Profit Factor", f"{pf:.2f}" if pf is not None else "—")
+    c4.metric("Net P&L", f"{net_pnl:+,.2f}")
+
+    c1,c2,c3,c4 = st.columns(4)
+    c1.metric("Winning Trades", f"{len(wins):,}")
+    c2.metric("Losing Trades", f"{len(losses):,}")
+    c3.metric("Breakeven", f"{breakeven:,}")
+    c4.metric("Expectancy / Trade", f"{expectancy:+,.2f}")
+
+    st.markdown("### Average Results")
+    c1,c2,c3 = st.columns(3)
+    c1.metric("Average Win", f"{avg_win:+,.2f}")
+    c2.metric("Average Loss", f"{avg_loss:+,.2f}")
+    c3.metric("Gross Profit / Gross Loss", f"{gross_profit:,.2f} / -{gross_loss_abs:,.2f}")
+
+    st.markdown("### Streaks")
+    c1,c2 = st.columns(2)
+    c1.metric("Max Winning Streak", f"{ws}")
+    c2.metric("Max Losing Streak", f"{ls}")
+
+    st.markdown("### RR / Holding Time")
+    st.info("Average RR และ Average Holding Time ยังไม่ถูกคำนวณใน Step 1 เพราะ mt5_trade_history ที่มีอยู่ยังไม่มีข้อมูล Entry→Exit pair พร้อม SL/TP ที่เพียงพอสำหรับคำนวณอย่างถูกต้อง")
+
+    view_cols = [c for c in ["deal_ticket","order_ticket","position_id","symbol","deal_type","entry_type","volume","price","net_result","deal_time"] if c in trades.columns]
+    if view_cols:
+        st.markdown("### Closed Trade Data ที่ใช้คำนวณ")
+        st.dataframe(trades[view_cols].head(100), use_container_width=True, hide_index=True)
+
+    st.caption("หมายเหตุ: ค่าทั้งหมดคำนวณจากข้อมูลที่ Collector เก็บจริง และยังไม่มีการให้คะแนนว่าเทรดดีหรือแย่")
+
 def page_open(pos: pd.DataFrame) -> None:
     st.subheader("ไม้ที่เปิดอยู่")
     if pos.empty:
@@ -1371,7 +1478,7 @@ def page_journal(df: pd.DataFrame, store: NoteStore, aid: str) -> None:
 # MAIN
 # =========================================================
 
-NAV = ["📊 Dashboard", "📐 Portfolio Exposure", "🛡️ Risk Engine", "🧠 Decision Engine", "🟡 ไม้ที่เปิดอยู่", "📓 Journal", "🔌 เชื่อมต่อบัญชี"]
+NAV = ["📊 Dashboard", "📈 Trading Performance", "📐 Portfolio Exposure", "🛡️ Risk Engine", "🧠 Decision Engine", "🟡 ไม้ที่เปิดอยู่", "📓 Journal", "🔌 เชื่อมต่อบัญชี"]
 
 
 def main() -> None:
@@ -1412,18 +1519,21 @@ def main() -> None:
             page_supabase_dashboard(fetch_latest_mt5_snapshot())
             return
         if page == NAV[1]:
-            page_exposure(fetch_latest_mt5_snapshot())
+            page_performance_baseline(fetch_latest_mt5_snapshot())
             return
         if page == NAV[2]:
-            page_risk_engine(fetch_latest_mt5_snapshot())
+            page_exposure(fetch_latest_mt5_snapshot())
             return
         if page == NAV[3]:
-            page_decision_engine(fetch_latest_mt5_snapshot())
+            page_risk_engine(fetch_latest_mt5_snapshot())
             return
         if page == NAV[4]:
+            page_decision_engine(fetch_latest_mt5_snapshot())
+            return
+        if page == NAV[5]:
             page_live_monitor(fetch_latest_mt5_snapshot())
             return
-        if page == NAV[6]:
+        if page == NAV[7]:
             st.subheader("🔌 MT5 Collector")
             st.success("Supabase เชื่อมต่อแล้ว — NobodyCollector กำลังส่งข้อมูลจาก MT5", icon="✅")
             st.code("MT5 → NobodyCollector → Supabase → Nobody Trade Journal", language="text")
@@ -1444,7 +1554,7 @@ def main() -> None:
         )
         st.stop()
 
-    if page == NAV[6]:
+    if page == NAV[7]:
         page_connect(token, region)
         return
 
@@ -1501,17 +1611,17 @@ def main() -> None:
     acc_region = acc.get("region") or region
     store = get_store()
     try:
-        if page == NAV[1]:
+        if page == NAV[2]:
             # Exposure page is available only in the free MT5 -> Supabase path.
             st.info("Portfolio Exposure ใช้ข้อมูล MT5 → Supabase; โหมด MetaApi เดิมยังไม่ได้เปิดหน้านี้")
             return
-        if page == NAV[4]:
+        if page == NAV[5]:
             page_open(fetch_positions(token, acc_region, aid))
             return
         with st.spinner("กำลังดึงประวัติเทรด..."):
             trades = fetch_history(token, acc_region, aid, days)
         df = merge_notes(trades, store.load(aid))
-        if page == NAV[5]:
+        if page == NAV[6]:
             page_journal(df, store, aid)
             return
         try:
