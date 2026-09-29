@@ -782,6 +782,96 @@ def page_dashboard(df: pd.DataFrame, metrics: dict, info: dict) -> None:
         c2.dataframe(g, use_container_width=True, hide_index=True)
 
 
+def page_live_monitor(snapshot: dict) -> None:
+    """Live trading monitor using only the existing MT5 -> Supabase data path."""
+    st.markdown('<div class="nj-section-title">Live Trading Monitor</div>', unsafe_allow_html=True)
+    st.caption("MT5 → NobodyCollector → Supabase · สำหรับดูสถานะบัญชี, Position และ Pending Order")
+
+    top1, top2, top3 = st.columns([1.1, 1.1, 4.8])
+    with top1:
+        if st.button("↻ รีเฟรช", use_container_width=True, key="live_monitor_refresh"):
+            clear_cache()
+            st.rerun()
+    with top2:
+        st.caption("ข้อมูลสดจาก Collector")
+
+    if not snapshot:
+        st.warning("ยังไม่พบ Account Snapshot จาก Supabase")
+        return
+    if snapshot.get("_error"):
+        st.error(f"อ่าน MT5 จาก Supabase ไม่สำเร็จ: {snapshot['_error']}")
+        return
+
+    cur = str(snapshot.get("currency") or "")
+    balance = _num(snapshot.get("balance"))
+    equity = _num(snapshot.get("equity"))
+    margin = _num(snapshot.get("margin"))
+    free_margin = _num(snapshot.get("free_margin"))
+    floating = equity - balance
+    collected = str(snapshot.get("collected_at") or "-")
+    login = str(snapshot.get("login") or "-")
+    server = str(snapshot.get("server") or "-")
+
+    status_html = (
+        '<div class="nj-card" style="margin:.35rem 0 1rem 0;">'
+        '<div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;">'
+        f'<div><b>🟢 MT5 Connected</b><div class="nj-muted">Login {login} · {server}</div></div>'
+        f'<div style="text-align:right;"><div class="nj-muted">Snapshot ล่าสุด</div><b>{collected}</b></div>'
+        '</div></div>'
+    )
+    st.markdown(status_html, unsafe_allow_html=True)
+
+    pos = fetch_mt5_positions_supabase(snapshot)
+    pending = fetch_mt5_pending_supabase(snapshot)
+    history = fetch_mt5_history_supabase(snapshot)
+
+    total_lots = _num(pos["volume"].sum()) if not pos.empty and "volume" in pos.columns else 0.0
+    floating_pos = _num(pos["profit"].sum()) if not pos.empty and "profit" in pos.columns else 0.0
+    buy_lots = 0.0
+    sell_lots = 0.0
+    if not pos.empty and "side" in pos.columns and "volume" in pos.columns:
+        sides = pos["side"].astype(str).str.upper()
+        buy_lots = _num(pos.loc[sides.str.contains("BUY", na=False), "volume"].sum())
+        sell_lots = _num(pos.loc[sides.str.contains("SELL", na=False), "volume"].sum())
+
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Balance", f"{balance:,.2f} {cur}".strip())
+    c2.metric("Equity", f"{equity:,.2f} {cur}".strip())
+    c3.metric("Floating P&L", f"{floating:+,.2f}")
+    c4.metric("Margin", f"{margin:,.2f}")
+    c5.metric("Free Margin", f"{free_margin:,.2f}")
+    c6.metric("Open Lots", f"{total_lots:,.2f}")
+
+    st.divider()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Open Positions", f"{len(pos)}")
+    c2.metric("BUY Lots", f"{buy_lots:,.2f}")
+    c3.metric("SELL Lots", f"{sell_lots:,.2f}")
+    c4.metric("Position P&L", f"{floating_pos:+,.2f}")
+
+    st.markdown("### 🟢 Open Positions")
+    render_supabase_positions(pos)
+
+    st.divider()
+    st.markdown("### 🟡 Pending Orders")
+    render_supabase_pending(pending)
+
+    st.divider()
+    st.markdown("### 📜 Recent Trades")
+    if history.empty:
+        st.info("ยังไม่มี Trade / Deal History")
+    else:
+        preferred = ["deal_time", "deal_ticket", "symbol", "deal_type", "entry_type", "volume", "price", "profit", "commission", "swap", "comment"]
+        cols = [c for c in preferred if c in history.columns]
+        view = history[cols].head(20).copy()
+        rename = {
+            "deal_time":"Time", "deal_ticket":"Deal", "symbol":"Symbol", "deal_type":"Type",
+            "entry_type":"Entry", "volume":"Lots", "price":"Price", "profit":"Profit",
+            "commission":"Commission", "swap":"Swap", "comment":"Comment",
+        }
+        st.dataframe(view.rename(columns=rename), use_container_width=True, hide_index=True)
+
+
 def page_open(pos: pd.DataFrame) -> None:
     st.subheader("ไม้ที่เปิดอยู่")
     if pos.empty:
@@ -962,19 +1052,7 @@ def main() -> None:
             page_supabase_dashboard(fetch_latest_mt5_snapshot())
             return
         if page == NAV[1]:
-            st.markdown('<div class="nj-section-title">Live Trading Monitor</div>', unsafe_allow_html=True)
-            st.caption("Open Positions จาก MT5 → NobodyCollector → Supabase")
-            top1, top2 = st.columns([1, 5])
-            with top1:
-                if st.button("↻ รีเฟรช", use_container_width=True, key="supabase_positions_refresh"):
-                    clear_cache()
-                    st.rerun()
-            snap = fetch_latest_mt5_snapshot()
-            if snap and not snap.get("_error"):
-                st.caption(f"บัญชี {snap.get('login','-')} · {snap.get('server','-')} · snapshot ล่าสุด {snap.get('collected_at','-')}")
-                render_supabase_positions(fetch_mt5_positions_supabase(snap))
-            else:
-                render_mt5_snapshot(snap)
+            page_live_monitor(fetch_latest_mt5_snapshot())
             return
         if page == NAV[3]:
             st.subheader("🔌 MT5 Collector")
