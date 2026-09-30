@@ -811,6 +811,177 @@ def page_dashboard(df: pd.DataFrame, metrics: dict, info: dict) -> None:
         c2.dataframe(g, use_container_width=True, hide_index=True)
 
 
+def _shadow_side(real_side: str) -> str:
+    side = str(real_side or "").upper()
+    if "BUY" in side:
+        return "SELL"
+    if "SELL" in side:
+        return "BUY"
+    return "-"
+
+
+def _shadow_rr(real_side: str, entry: float, sl: float, tp: float):
+    if not entry or not sl or not tp:
+        return None
+    side = str(real_side or "").upper()
+    if "BUY" in side:
+        risk = abs(entry - sl)
+        reward = abs(tp - entry)
+    elif "SELL" in side:
+        risk = abs(sl - entry)
+        reward = abs(entry - tp)
+    else:
+        return None
+    if risk <= 0:
+        return None
+    # Shadow swaps SL/TP, therefore its RR is the reciprocal of the real RR.
+    return risk / reward if reward > 0 else None
+
+
+def _shadow_live_df(pos: pd.DataFrame) -> pd.DataFrame:
+    """Build inverse shadow positions directly from the live MT5 positions.
+    No real order is ever sent to MT5.
+    """
+    if pos.empty:
+        return pd.DataFrame()
+    rows = []
+    for _, r in pos.iterrows():
+        real_side = str(r.get("side") or "").upper()
+        if "BUY" not in real_side and "SELL" not in real_side:
+            continue
+        entry = _num(r.get("open_price"))
+        current = _num(r.get("current_price"))
+        real_sl = _num(r.get("stop_loss"), 0.0)
+        real_tp = _num(r.get("take_profit"), 0.0)
+        real_profit = _num(r.get("profit"))
+        shadow_side = _shadow_side(real_side)
+        rows.append({
+            "real_ticket": r.get("ticket"),
+            "symbol": r.get("symbol"),
+            "real_side": "BUY" if "BUY" in real_side else "SELL",
+            "shadow_side": shadow_side,
+            "volume": _num(r.get("volume")),
+            "entry_price": entry,
+            "current_price": current,
+            "real_sl": real_sl,
+            "real_tp": real_tp,
+            "shadow_sl": real_tp,
+            "shadow_tp": real_sl,
+            "shadow_market_pnl": -real_profit,
+            "shadow_rr": _shadow_rr(real_side, entry, real_sl, real_tp),
+            "status": "OPEN" if real_sl and real_tp else "OPEN — รอ SL/TP",
+        })
+    return pd.DataFrame(rows)
+
+
+def _shadow_closed_df(history: pd.DataFrame) -> pd.DataFrame:
+    """Reconstruct closed inverse trades from existing MT5 deal history."""
+    if history.empty or "position_id" not in history.columns:
+        return pd.DataFrame()
+    work = history.copy()
+    for c in ("profit", "commission", "swap", "fee", "volume", "price"):
+        if c in work.columns:
+            work[c] = pd.to_numeric(work[c], errors="coerce").fillna(0.0)
+    work["entry_type_norm"] = work.get("entry_type", "").astype(str).str.upper()
+    rows = []
+    for pid, g in work.groupby("position_id", dropna=True):
+        ins = g[g["entry_type_norm"].str.contains("IN", na=False)]
+        outs = g[g["entry_type_norm"].str.contains("OUT", na=False)]
+        if ins.empty or outs.empty:
+            continue
+        first = ins.sort_values("deal_time" if "deal_time" in ins.columns else "entry_type_norm").iloc[0]
+        real_type = str(first.get("deal_type") or "").upper()
+        if "BUY" not in real_type and "SELL" not in real_type:
+            continue
+        real_side = "BUY" if "BUY" in real_type else "SELL"
+        entry = _num(first.get("price"))
+        volume = _num(first.get("volume"))
+        real_profit = _num(g.get("profit", pd.Series(dtype=float)).sum())
+        costs = _num(g.get("commission", pd.Series(dtype=float)).sum()) + _num(g.get("swap", pd.Series(dtype=float)).sum()) + _num(g.get("fee", pd.Series(dtype=float)).sum())
+        exit_volume = _num(outs.get("volume", pd.Series(dtype=float)).sum())
+        if exit_volume > 0 and "price" in outs.columns:
+            exit_price = float((outs["price"] * outs["volume"]).sum() / exit_volume)
+        else:
+            exit_price = _num(outs.iloc[-1].get("price"))
+        rows.append({
+            "position_id": pid,
+            "symbol": first.get("symbol"),
+            "real_side": real_side,
+            "shadow_side": _shadow_side(real_side),
+            "volume": volume,
+            "entry_price": entry,
+            "exit_price": exit_price,
+            "shadow_market_pnl": -real_profit,
+            "shadow_costs": costs,
+            "shadow_net": -real_profit + costs,
+            "deal_count": len(g),
+            "close_time": outs["deal_time"].max() if "deal_time" in outs.columns else None,
+        })
+    return pd.DataFrame(rows)
+
+
+def page_shadow_portfolio(snapshot: dict, pos: pd.DataFrame, history: pd.DataFrame) -> None:
+    """Inverse shadow portfolio. Simulation only; never sends a broker order."""
+    st.markdown('<div class="nj-section-title">🌑 Shadow Portfolio</div>', unsafe_allow_html=True)
+    st.caption("พอร์ตจำลองตรงข้ามกับ Real Trade · ไม่ส่งคำสั่งจริงไป MT5")
+
+    live = _shadow_live_df(pos)
+    closed = _shadow_closed_df(history)
+
+    live_pnl = _num(live["shadow_market_pnl"].sum()) if not live.empty else 0.0
+    closed_net = _num(closed["shadow_net"].sum()) if not closed.empty else 0.0
+    total_net = closed_net + live_pnl
+    wins = int((closed["shadow_net"] > 0).sum()) if not closed.empty else 0
+    losses = int((closed["shadow_net"] < 0).sum()) if not closed.empty else 0
+    total_closed = len(closed)
+    win_rate = (wins / total_closed * 100.0) if total_closed else 0.0
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Shadow Net P&L", f"{total_net:+,.2f}")
+    c2.metric("Closed Shadow", f"{total_closed}")
+    c3.metric("Win Rate", f"{win_rate:.1f}%")
+    c4.metric("Open Shadow", f"{len(live)}")
+    c5.metric("Floating Shadow", f"{live_pnl:+,.2f}")
+
+    st.info("Logic: Real BUY → Shadow SELL · Real SELL → Shadow BUY · Shadow TP = Real SL · Shadow SL = Real TP", icon="↔️")
+
+    if not live.empty:
+        st.markdown("### 🟣 Shadow Open Positions")
+        for _, r in live.iterrows():
+            rr = f"{r['shadow_rr']:.2f}" if pd.notna(r.get("shadow_rr")) else "—"
+            shadow_pnl = _num(r.get("shadow_market_pnl"))
+            tone = "#20d68a" if shadow_pnl >= 0 else "#ff6174"
+            sl = f"{r['shadow_sl']:,.5f}" if _num(r.get("shadow_sl")) else "—"
+            tp = f"{r['shadow_tp']:,.5f}" if _num(r.get("shadow_tp")) else "—"
+            card = f"""<div class="nj-card">
+<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
+<div><b>🌑 {r.get('symbol','-')}</b> <span class="nj-tag">{r.get('shadow_side','-')}</span> <span class="nj-muted">{_num(r.get('volume')):.2f} lot</span></div>
+<div style="font-weight:800;color:{tone};">{shadow_pnl:+,.2f}</div>
+</div>
+<div style="display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-top:10px;font-size:12px;">
+<div><span class="nj-muted">Entry</span><br><b>{_num(r.get('entry_price')):,.5f}</b></div>
+<div><span class="nj-muted">Current</span><br><b>{_num(r.get('current_price')):,.5f}</b></div>
+<div><span class="nj-muted">Shadow SL</span><br><b>{sl}</b></div>
+<div><span class="nj-muted">Shadow TP</span><br><b>{tp}</b></div>
+<div><span class="nj-muted">Shadow RR</span><br><b>{rr}</b></div>
+</div>
+<div class="nj-muted" style="margin-top:8px;">Real Ticket {r.get('real_ticket','-')} · {r.get('status','OPEN')}</div>
+</div>"""
+            st.markdown(card, unsafe_allow_html=True)
+    else:
+        st.info("ตอนนี้ไม่มี Real Position ที่เปิดอยู่ → Shadow ก็ไม่มี Position เปิด")
+
+    if not closed.empty:
+        st.markdown("### 📜 Shadow Closed Trades")
+        view = closed.sort_values("close_time", ascending=False).head(100).copy()
+        view["Shadow P&L"] = view["shadow_net"].map(lambda x: f"{x:+,.2f}")
+        view["Direction"] = view["shadow_side"]
+        cols = [c for c in ["position_id", "symbol", "Direction", "volume", "entry_price", "exit_price", "Shadow P&L", "close_time"] if c in view.columns]
+        st.dataframe(view[cols], use_container_width=True, hide_index=True)
+    else:
+        st.caption("ยังไม่มี Shadow Trade ที่ปิดสมบูรณ์")
+
+
 def page_live_monitor(snapshot: dict) -> None:
     """Live trading monitor using only the existing MT5 -> Supabase data path."""
     st.markdown('<div class="nj-section-title">Live Trading Monitor</div>', unsafe_allow_html=True)
@@ -2666,7 +2837,7 @@ def page_journal(df: pd.DataFrame, store: NoteStore, aid: str) -> None:
 # MAIN
 # =========================================================
 
-NAV = ["📊 Dashboard", "📝 New Trade Setup", "🛡️ Setup Compliance", "🥇 Gold Journal", "📈 Trading Performance", "📊 Performance Breakdown", "🧠 Trading Behavior", "🧬 Trading DNA", "📐 Portfolio Exposure", "🛡️ Risk Engine", "🧠 Decision Engine", "🟡 ไม้ที่เปิดอยู่", "📓 Journal", "🔌 เชื่อมต่อบัญชี"]
+NAV = ["📊 Dashboard", "📝 New Trade Setup", "🛡️ Setup Compliance", "🥇 Gold Journal", "📈 Trading Performance", "📊 Performance Breakdown", "🧠 Trading Behavior", "🧬 Trading DNA", "📐 Portfolio Exposure", "🛡️ Risk Engine", "🧠 Decision Engine", "🟡 ไม้ที่เปิดอยู่", "🌑 Shadow Portfolio", "📓 Journal", "🔌 เชื่อมต่อบัญชี"]
 
 
 # =========================================================
@@ -3228,6 +3399,14 @@ def main() -> None:
             return
         if page == "🟡 ไม้ที่เปิดอยู่":
             page_live_monitor(fetch_latest_mt5_snapshot())
+            return
+        if page == "🌑 Shadow Portfolio":
+            live_snapshot = fetch_latest_mt5_snapshot()
+            page_shadow_portfolio(
+                live_snapshot,
+                fetch_mt5_positions_supabase(live_snapshot),
+                fetch_mt5_history_supabase(live_snapshot),
+            )
             return
         if page == "🔌 เชื่อมต่อบัญชี":
             st.subheader("🔌 MT5 Collector")
