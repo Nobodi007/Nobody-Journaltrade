@@ -931,18 +931,42 @@ def page_shadow_portfolio(snapshot: dict, pos: pd.DataFrame, history: pd.DataFra
     live_pnl = _num(live["shadow_market_pnl"].sum()) if not live.empty else 0.0
     closed_net = _num(closed["shadow_net"].sum()) if not closed.empty else 0.0
     total_net = closed_net + live_pnl
-    wins = int((closed["shadow_net"] > 0).sum()) if not closed.empty else 0
+    wins = int((closed["shadow_net"] >= 2.0).sum()) if not closed.empty else 0
     losses = int((closed["shadow_net"] < 0).sum()) if not closed.empty else 0
-    total_closed = len(closed)
-    win_rate = (wins / total_closed * 100.0) if total_closed else 0.0
+    breakevens = int(((closed["shadow_net"] >= 0) & (closed["shadow_net"] < 2.0)).sum()) if not closed.empty else 0
+    decisive = wins + losses
+    win_rate = (wins / decisive * 100.0) if decisive else 0.0
+    real_balance = _num(snapshot.get("balance"))
+
+    # Pin the initial capital for the current Streamlit session; do not reset it on every rerun.
+    if "shadow_starting_capital" not in st.session_state:
+        st.session_state["shadow_starting_capital"] = real_balance
+    start_capital = _num(st.session_state.get("shadow_starting_capital"))
+    cur = str(snapshot.get("currency") or "")
+    with st.expander("⚙️ Shadow Capital Settings", expanded=False):
+        st.caption("ค่าเริ่มต้นอ้างอิง Balance จาก MT5 ครั้งแรกของ session นี้; แก้ทุนตั้งต้นได้ที่นี่")
+        edited_capital = st.number_input(
+            f"Shadow Starting Capital ({cur or 'account currency'})",
+            min_value=0.0, value=float(max(0.0, start_capital)),
+            step=10.0, key="shadow_starting_capital_input",
+        )
+        if st.button("ใช้ทุนตั้งต้นนี้", key="shadow_apply_capital"):
+            st.session_state["shadow_starting_capital"] = float(edited_capital)
+            start_capital = float(edited_capital)
+            st.rerun()
+
+    shadow_balance = start_capital + closed_net
+    shadow_equity = shadow_balance + live_pnl
+    shadow_return = ((shadow_equity - start_capital) / start_capital * 100.0) if start_capital > 0 else 0.0
 
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Shadow Net P&L", f"{total_net:+,.2f}")
-    c2.metric("Closed Shadow", f"{total_closed}")
-    c3.metric("Win Rate", f"{win_rate:.1f}%")
-    c4.metric("Open Shadow", f"{len(live)}")
-    c5.metric("Floating Shadow", f"{live_pnl:+,.2f}")
+    c1.metric("Shadow Starting Capital", f"{start_capital:,.2f} {cur}".strip())
+    c2.metric("Shadow Balance", f"{shadow_balance:,.2f} {cur}".strip())
+    c3.metric("Shadow Equity", f"{shadow_equity:,.2f} {cur}".strip(), f"{shadow_return:+.2f}%")
+    c4.metric("Shadow Win Rate", f"{win_rate:.1f}%", f"{wins}W / {losses}L · {breakevens} BE")
+    c5.metric("Floating Shadow", f"{live_pnl:+,.2f} {cur}".strip())
 
+    st.caption(f"Shadow Net P&L: {total_net:+,.2f} {cur} · Closed Shadow: {len(closed)} · Open Shadow: {len(live)}")
     st.info("Logic: Real BUY → Shadow SELL · Real SELL → Shadow BUY · Shadow TP = Real SL · Shadow SL = Real TP", icon="↔️")
 
     if not live.empty:
@@ -974,9 +998,10 @@ def page_shadow_portfolio(snapshot: dict, pos: pd.DataFrame, history: pd.DataFra
     if not closed.empty:
         st.markdown("### 📜 Shadow Closed Trades")
         view = closed.sort_values("close_time", ascending=False).head(100).copy()
+        view["Shadow Result"] = view["shadow_net"].map(lambda x: "WIN" if x >= 2.0 else ("BE" if x >= 0 else "LOSS"))
         view["Shadow P&L"] = view["shadow_net"].map(lambda x: f"{x:+,.2f}")
         view["Direction"] = view["shadow_side"]
-        cols = [c for c in ["position_id", "symbol", "Direction", "volume", "entry_price", "exit_price", "Shadow P&L", "close_time"] if c in view.columns]
+        cols = [c for c in ["position_id", "symbol", "Direction", "volume", "entry_price", "exit_price", "Shadow P&L", "Shadow Result", "close_time"] if c in view.columns]
         st.dataframe(view[cols], use_container_width=True, hide_index=True)
     else:
         st.caption("ยังไม่มี Shadow Trade ที่ปิดสมบูรณ์")
@@ -1555,12 +1580,25 @@ def _gold_position_trade_rows(history: pd.DataFrame) -> pd.DataFrame:
     return out.sort_values("deal_time", ascending=False, kind="stable").reset_index(drop=True)
 
 
+BE_THRESHOLD_USD = 2.0
+
+def _trade_outcome(value: float) -> str:
+    """Classify a closed trade: >= $2 Win, small nonnegative result BE, any loss Loss."""
+    x = float(value or 0.0)
+    if x < 0:
+        return "Loss"
+    if x < BE_THRESHOLD_USD:
+        return "Breakeven"
+    return "Win"
+
+
 def _streaks(results: list[float]) -> tuple[int, int]:
     best_w = best_l = cur_w = cur_l = 0
     for x in results:
-        if x > 0:
+        outcome = _trade_outcome(x)
+        if outcome == "Win":
             cur_w += 1; cur_l = 0; best_w = max(best_w, cur_w)
-        elif x < 0:
+        elif outcome == "Loss":
             cur_l += 1; cur_w = 0; best_l = max(best_l, cur_l)
         else:
             cur_w = cur_l = 0
@@ -1638,15 +1676,17 @@ def _breakdown_metrics(df: pd.DataFrame) -> dict:
             "pf": None, "expectancy": 0.0,
         }
     r = pd.to_numeric(df["net_result"], errors="coerce").fillna(0.0)
-    wins = r[r > 0]
-    losses = r[r < 0]
+    outcomes = r.map(_trade_outcome)
+    wins = r[outcomes == "Win"]
+    losses = r[outcomes == "Loss"]
     gp = float(wins.sum())
     gl = float(abs(losses.sum()))
     return {
         "trades": int(len(r)),
-        "wins": int((r > 0).sum()),
-        "losses": int((r < 0).sum()),
-        "win_rate": float((r > 0).mean() * 100) if len(r) else 0.0,
+        "wins": int((outcomes == "Win").sum()),
+        "losses": int((outcomes == "Loss").sum()),
+        "breakeven": int((outcomes == "Breakeven").sum()),
+        "win_rate": float((outcomes == "Win").sum() / max(1, (outcomes != "Breakeven").sum()) * 100) if (outcomes != "Breakeven").any() else 0.0,
         "gross_profit": gp,
         "gross_loss": gl,
         "net_pnl": float(r.sum()),
@@ -1831,7 +1871,7 @@ def _behavior_analysis(trades: pd.DataFrame) -> dict:
     max_drawdown_idx = int(drawdown.idxmin()) if len(drawdown) else None
 
     # Count each run of consecutive wins/losses and expose the sequence table.
-    outcomes = w["net_result"].apply(lambda x: "Win" if x > 0 else ("Loss" if x < 0 else "Breakeven"))
+    outcomes = w["net_result"].apply(_trade_outcome)
     runs = []
     current = None
     start = 0
@@ -1975,14 +2015,16 @@ def _dna_group_table(w: pd.DataFrame, key: str, label: str) -> pd.DataFrame:
     rows = []
     for value, g in w.groupby(key, dropna=False, observed=False):
         r = pd.to_numeric(g["net_result"], errors="coerce").fillna(0.0)
-        wins = int((r > 0).sum())
-        losses = int((r < 0).sum())
-        gp = float(r[r > 0].sum())
-        gl = float(abs(r[r < 0].sum()))
+        outcomes = r.map(_trade_outcome)
+        wins = int((outcomes == "Win").sum())
+        losses = int((outcomes == "Loss").sum())
+        gp = float(r[outcomes == "Win"].sum())
+        gl = float(abs(r[outcomes == "Loss"].sum()))
+        decisive = wins + losses
         rows.append({
             label: "Unknown" if pd.isna(value) else str(value),
             "Trades": int(len(r)),
-            "Win Rate": (wins / len(r) * 100.0) if len(r) else 0.0,
+            "Win Rate": (wins / decisive * 100.0) if decisive else 0.0,
             "Net P&L": float(r.sum()),
             "Profit Factor": (gp / gl) if gl > 0 else None,
             "Expectancy": float(r.mean()) if len(r) else 0.0,
@@ -2561,13 +2603,15 @@ def page_gold_journal(snapshot: dict) -> None:
         return
 
     results = pd.to_numeric(trades["net_result"], errors="coerce").fillna(0.0)
-    wins = results[results > 0]
-    losses = results[results < 0]
+    outcomes = results.map(_trade_outcome)
+    wins = results[outcomes == "Win"]
+    losses = results[outcomes == "Loss"]
     gross_profit = float(wins.sum())
     gross_loss_abs = float(abs(losses.sum()))
     net_pnl = float(results.sum())
     total = int(len(results))
-    win_rate = float(len(wins) / total * 100) if total else 0.0
+    decisive = len(wins) + len(losses)
+    win_rate = float(len(wins) / decisive * 100) if decisive else 0.0
     pf = gross_profit / gross_loss_abs if gross_loss_abs > 0 else None
     expectancy = float(results.mean()) if total else 0.0
     ws, ls = _streaks(results.tolist())
@@ -2652,13 +2696,14 @@ def page_performance_baseline(snapshot: dict) -> None:
     results = trades["net_result"].astype(float)
     wins = results[results > 0]
     losses = results[results < 0]
-    breakeven = int((results == 0).sum())
+    breakeven = int((outcomes == "Breakeven").sum())
     total = len(results)
     gross_profit = float(wins.sum())
     gross_loss_abs = float(abs(losses.sum()))
     net_pnl = float(results.sum())
-    win_rate = float(len(wins) / total * 100) if total else 0.0
-    loss_rate = float(len(losses) / total * 100) if total else 0.0
+    decisive = len(wins) + len(losses)
+    win_rate = float(len(wins) / decisive * 100) if decisive else 0.0
+    loss_rate = float(len(losses) / decisive * 100) if decisive else 0.0
     pf = gross_profit / gross_loss_abs if gross_loss_abs > 0 else None
     avg_win = float(wins.mean()) if len(wins) else 0.0
     avg_loss = float(losses.mean()) if len(losses) else 0.0
