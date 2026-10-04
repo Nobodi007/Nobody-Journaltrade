@@ -938,23 +938,10 @@ def page_shadow_portfolio(snapshot: dict, pos: pd.DataFrame, history: pd.DataFra
     win_rate = (wins / decisive * 100.0) if decisive else 0.0
     real_balance = _num(snapshot.get("balance"))
 
-    # Pin the initial capital for the current Streamlit session; do not reset it on every rerun.
-    if "shadow_starting_capital" not in st.session_state:
-        st.session_state["shadow_starting_capital"] = real_balance
-    start_capital = _num(st.session_state.get("shadow_starting_capital"))
+    # Shadow capital is referenced directly from the current real MT5 portfolio balance.
+    # No user-editable capital override or session-pinned starting balance.
     cur = str(snapshot.get("currency") or "")
-    with st.expander("⚙️ Shadow Capital Settings", expanded=False):
-        st.caption("ค่าเริ่มต้นอ้างอิง Balance จาก MT5 ครั้งแรกของ session นี้; แก้ทุนตั้งต้นได้ที่นี่")
-        edited_capital = st.number_input(
-            f"Shadow Starting Capital ({cur or 'account currency'})",
-            min_value=0.0, value=float(max(0.0, start_capital)),
-            step=10.0, key="shadow_starting_capital_input",
-        )
-        if st.button("ใช้ทุนตั้งต้นนี้", key="shadow_apply_capital"):
-            st.session_state["shadow_starting_capital"] = float(edited_capital)
-            start_capital = float(edited_capital)
-            st.rerun()
-
+    start_capital = real_balance
     shadow_balance = start_capital + closed_net
     shadow_equity = shadow_balance + live_pnl
     shadow_return = ((shadow_equity - start_capital) / start_capital * 100.0) if start_capital > 0 else 0.0
