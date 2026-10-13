@@ -47,12 +47,13 @@ _STRETCH = (
 
 
 def stretch(fn, *args, **kw):
+    err = None
     for opt in _STRETCH:
         try:
             return fn(*args, **opt, **kw)
-        except Exception:  # noqa: BLE001
-            continue
-    return fn(*args, **kw)
+        except Exception as exc:  # noqa: BLE001
+            err = exc
+    raise err
 
 
 def plot(fig) -> None:
@@ -110,7 +111,9 @@ def style(df: pd.DataFrame, formats: dict, pnl_cols: list[str]):
 
 
 def show_table(sty, height: int | None = None, **kw):
-    return stretch(st.dataframe, sty, hide_index=True, height=height, **kw)
+    if height is not None:  # Streamlit รุ่นใหม่ไม่รับ height=None
+        kw["height"] = height
+    return stretch(st.dataframe, sty, hide_index=True, **kw)
 
 
 def snapshot_age(snap: dict) -> float | None:
