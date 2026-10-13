@@ -2683,7 +2683,7 @@ def page_performance_baseline(snapshot: dict) -> None:
     results = trades["net_result"].astype(float)
     wins = results[results > 0]
     losses = results[results < 0]
-    breakeven = int((outcomes == "Breakeven").sum())
+    breakeven = int((results == 0).sum())
     total = len(results)
     gross_profit = float(wins.sum())
     gross_loss_abs = float(abs(losses.sum()))
